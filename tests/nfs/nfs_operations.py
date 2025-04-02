@@ -37,39 +37,86 @@ def setup_nfs_cluster(
     vip=None,
     ceph_cluster=None,
 ):
-    # Get ceph cluter object and setup start time
-    global ceph_cluster_obj
-    global setup_start_time
-    ceph_cluster_obj = ceph_cluster
-    setup_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    setup_start_time = datetime.strptime(setup_start_time, "%Y-%m-%d %H:%M:%S")
+    installer_node = ceph_cluster_obj.get_nodes("installer")
+    ganesha_conf = ""
+    conf_template = """
+EXPORT {
+    Export_ID = %s;
+    Path = "%s";
+    Pseudo = "/nfs_%s";
+    Protocols = 4;
+    Transports = TCP;
+    Access_Type = RW;
+    Squash = None;
+    FSAL {
+        Name = "CEPH";
+        User_Id = "admin";
+        Secret_Access_Key = "";
+    }
+}
+"""
 
-    # Step 1: Enable nfs
-    Ceph(clients[0]).mgr.module.enable(module="nfs", force=True)
-    sleep(3)
-
-    # Step 2: Create an NFS cluster
-    Ceph(clients[0]).nfs.cluster.create(
-        name=nfs_name, nfs_server=nfs_server, ha=ha, vip=vip
-    )
-    sleep(3)
-
-    # Step 3: Perform Export on clients
-    export_list = []
+    # Step 3: Create export
     i = 0
-    for client in clients:
+    export_list = []
+    for _ in clients:
         export_name = f"{export}_{i}"
-        Ceph(client).nfs.export.create(
-            fs_name=fs_name, nfs_name=nfs_name, nfs_export=export_name, fs=fs
+        # Step 1: Check if the subvolume group is present.If not, create subvolume group
+        cmd = "ceph fs subvolumegroup ls cephfs"
+        out = installer_node.execute(sudo=True, cmd=cmd)
+        subvol_name = export_name.replace("/", "")
+        if "[]" in out[0]:
+            cmd = "ceph fs subvolumegroup create cephfs ganeshagroup"
+            installer_node.execute(sudo=True, cmd=cmd)
+            log.info("Subvolume group created successfully")
+
+            # Step 2: Create subvolume
+            cmd = f"ceph fs subvolume create cephfs {subvol_name} --group_name ganeshagroup --namespace-isolated"
+            installer_node.execute(sudo=True, cmd=cmd)
+
+        # Get volume path
+        cmd = (
+            f"ceph fs subvolume getpath cephfs {subvol_name} --group_name ganeshagroup"
         )
+        out = installer_node.execute(sudo=True, cmd=cmd)
+        path = out[0].strip()
+        ganesha_conf += conf_template % (i, path, i)
         i += 1
+
+        # stop ganesha service
+        cmd = "pgrep ganesha"
+        out = installer_node.execute(sudo=True, cmd=cmd)
+        pid = out[0].strip()
+
+        if pid:
+            cmd = f"kill -9 {pid}"
+            installer_node.execute(sudo=True, cmd=cmd)
+        cmds = ["mkdir -p /var/run/ganesha",
+               "chmod 755 /var/run/ganesha",
+               "chown root:root /var/run/ganesha"]
+        for cmd in cmds:
+            installer_node.execute(cmd=cmd, sudo=True)
+        # Update ganesha.conf file
+        cmd = f"echo {ganesha_conf} > /etc/ganesha/ganesha.conf"
+        installer_node.execute(sudo=True, cmd=cmd)
+
+        # Restart Ganesha
+        cmd = f"$WORKSPACE nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf -L /var/log/ganesha.log"
+        installer_node.execute(sudo=True, cmd=cmd)
+
+        # Check if ganesha service is up
+        cmd = "pgrep ganesha"
+        out = installer_node.execute(sudo=True, cmd=cmd)
+        pid = out[0].strip()
+        if not pid:
+            raise OperationFailedError("Failed to restart nfs service")
+
         export_list.append(export_name)
         sleep(1)
 
     # Get the mount versions specific to clients
     mount_versions = _get_client_specific_mount_versions(version, clients)
 
-    # Step 4: Perform nfs mount
     # If there are multiple nfs servers provided, only one is required for mounting
     if isinstance(nfs_server, list):
         nfs_server = nfs_server[0]
@@ -151,29 +198,6 @@ def cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export):
         log.info("Removing nfs-ganesha mount dir on client:")
         client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_mount}")
         sleep(3)
-
-    # Delete all exports
-    for i in range(len(clients)):
-        Ceph(clients[0]).nfs.export.delete(nfs_name, f"{nfs_export}_{i}")
-    Ceph(clients[0]).nfs.cluster.delete(nfs_name)
-    sleep(30)
-    check_nfs_daemons_removed(clients[0])
-
-    # Delete the subvolume
-    for i in range(len(clients)):
-        cmd = "ceph fs subvolume ls cephfs --group_name ganeshagroup"
-        out = client.exec_command(sudo=True, cmd=cmd)
-        json_string, _ = out
-        data = json.loads(json_string)
-        # Extract names of subvolume
-        for item in data:
-            subvol = item["name"]
-            cmd = f"ceph fs subvolume rm cephfs {subvol} --group_name ganeshagroup"
-            client.exec_command(sudo=True, cmd=cmd)
-
-    # Delete the subvolume group
-    cmd = "ceph fs subvolumegroup rm cephfs ganeshagroup --force"
-    client.exec_command(sudo=True, cmd=cmd)
 
 
 def _get_client_specific_mount_versions(versions, clients):

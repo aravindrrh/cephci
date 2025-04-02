@@ -68,10 +68,10 @@ def run(**kw):
 
     # skip subscription manager if testing beta RHEL
     config = kw.get("config")
-    skip_subscription = config.get("skip_subscription", False)
+    skip_subscription = True
     enable_eus = config.get("enable_eus", False)
     repo = config.get("add-repo", False)
-    skip_enabling_rhel_rpms = config.get("skip_enabling_rhel_rpms", False)
+    skip_enabling_rhel_rpms = True
     fips_mode = config.get("enable_fips_mode", False)
 
     cloud_type = config.get("cloud-type", "openstack")
@@ -100,10 +100,10 @@ def run(**kw):
 def install_prereq(
     ceph,
     test_data=None,  # Default value for test_data
-    skip_subscription=False,
+    skip_subscription=True,
     repo=False,
     enable_eus=False,
-    skip_enabling_rhel_rpms=False,
+    skip_enabling_rhel_rpms=True,
     cloud_type="openstack",
     fips_mode=False,
 ):
