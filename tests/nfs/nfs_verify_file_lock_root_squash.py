@@ -92,11 +92,13 @@ def run(ceph_cluster, **kw):
         )
 
         # Create export
+
         Ceph(clients[0]).nfs.export.create(
             fs_name=fs_name,
             nfs_name=nfs_name,
             nfs_export=nfs_export_squash,
             fs=fs_name,
+            installer=installer
         )
         # Mount the volume with rootsquash enable on client 1 and 2
         for client in clients[:2]:
@@ -108,7 +110,7 @@ def run(ceph_cluster, **kw):
                 mount=nfs_squash_mount,
                 version=version,
                 port=port,
-                server=nfs_server_name,
+                server=installer.ip_address,
                 export=nfs_export_squash,
             ):
                 raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")

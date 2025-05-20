@@ -52,12 +52,14 @@ def run(ceph_cluster, **kw):
         )
 
         # Create export with RO permission
+        installer = ceph_cluster.get_nodes("installer")[0]
         Ceph(clients[0]).nfs.export.create(
             fs_name=fs_name,
             nfs_name=nfs_name,
             nfs_export=nfs_export_readonly,
             fs=fs_name,
             readonly=True,
+            installer=installer
         )
 
         # Mount the readonlyvolume on client
@@ -66,7 +68,7 @@ def run(ceph_cluster, **kw):
             mount=nfs_readonly_mount,
             version=version,
             port=port,
-            server=nfs_server_name,
+            server=installer.ip_address,
             export=nfs_export_readonly,
         ):
             log.error(f"Failed to mount nfs on {clients[0].hostname}")

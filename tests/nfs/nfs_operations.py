@@ -37,8 +37,17 @@ def setup_nfs_cluster(
     vip=None,
     ceph_cluster=None,
 ):
-    installer_node = ceph_cluster_obj.get_nodes("installer")
-    ganesha_conf = ""
+    installer_node = ceph_cluster.get_nodes("installer")[0]
+    ganesha_conf = """NFS_CORE_PARAM {
+    Enable_NLM = false;
+    Enable_RQUOTA = false;
+    Protocols = 4;
+}
+
+EXPORT_DEFAULTS {
+    Access_Type = RW;
+}
+"""
     conf_template = """
 EXPORT {
     Export_ID = %s;
@@ -50,8 +59,6 @@ EXPORT {
     Squash = None;
     FSAL {
         Name = "CEPH";
-        User_Id = "admin";
-        Secret_Access_Key = "";
     }
 }
 """
@@ -63,56 +70,64 @@ EXPORT {
         export_name = f"{export}_{i}"
         # Step 1: Check if the subvolume group is present.If not, create subvolume group
         cmd = "ceph fs subvolumegroup ls cephfs"
-        out = installer_node.execute(sudo=True, cmd=cmd)
+        out = installer_node.exec_command(sudo=True, cmd=cmd)
         subvol_name = export_name.replace("/", "")
         if "[]" in out[0]:
             cmd = "ceph fs subvolumegroup create cephfs ganeshagroup"
-            installer_node.execute(sudo=True, cmd=cmd)
+            installer_node.exec_command(sudo=True, cmd=cmd)
             log.info("Subvolume group created successfully")
 
-            # Step 2: Create subvolume
-            cmd = f"ceph fs subvolume create cephfs {subvol_name} --group_name ganeshagroup --namespace-isolated"
-            installer_node.execute(sudo=True, cmd=cmd)
+        # Step 2: Create subvolume
+        cmd = f"ceph fs subvolume create cephfs {subvol_name} --group_name ganeshagroup --namespace-isolated"
+        installer_node.exec_command(sudo=True, cmd=cmd)
 
         # Get volume path
         cmd = (
             f"ceph fs subvolume getpath cephfs {subvol_name} --group_name ganeshagroup"
         )
-        out = installer_node.execute(sudo=True, cmd=cmd)
+        out = installer_node.exec_command(sudo=True, cmd=cmd)
         path = out[0].strip()
-        ganesha_conf += conf_template % (i, path, i)
+        ganesha_conf += conf_template % (100+i, path, i)
         i += 1
-
-        # stop ganesha service
-        cmd = "pgrep ganesha"
-        out = installer_node.execute(sudo=True, cmd=cmd)
-        pid = out[0].strip()
-
-        if pid:
-            cmd = f"kill -9 {pid}"
-            installer_node.execute(sudo=True, cmd=cmd)
-        cmds = ["mkdir -p /var/run/ganesha",
-               "chmod 755 /var/run/ganesha",
-               "chown root:root /var/run/ganesha"]
-        for cmd in cmds:
-            installer_node.execute(cmd=cmd, sudo=True)
-        # Update ganesha.conf file
-        cmd = f"echo {ganesha_conf} > /etc/ganesha/ganesha.conf"
-        installer_node.execute(sudo=True, cmd=cmd)
-
-        # Restart Ganesha
-        cmd = f"$WORKSPACE nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf -L /var/log/ganesha.log"
-        installer_node.execute(sudo=True, cmd=cmd)
-
-        # Check if ganesha service is up
-        cmd = "pgrep ganesha"
-        out = installer_node.execute(sudo=True, cmd=cmd)
-        pid = out[0].strip()
-        if not pid:
-            raise OperationFailedError("Failed to restart nfs service")
-
         export_list.append(export_name)
         sleep(1)
+    # stop ganesha service
+    pid = ""
+    try:
+        cmd = "pgrep ganesha"
+        out = installer_node.exec_command(sudo=True, cmd=cmd)
+        pid = out[0].strip()
+        print("PID : ", pid)
+    except Exception:
+        pass
+
+    if pid:
+        cmd = f"kill -9 {pid}"
+        installer_node.exec_command(sudo=True, cmd=cmd)
+    cmds = ["mkdir -p /var/run/ganesha",
+           "chmod 755 /var/run/ganesha",
+           "chown root:root /var/run/ganesha"]
+    for cmd in cmds:
+        installer_node.exec_command(cmd=cmd, sudo=True)
+    # Update ganesha.conf file
+    cmd = f"echo \"{ganesha_conf}\" > /etc/ganesha/ganesha.conf"
+    installer_node.exec_command(sudo=True, cmd=cmd)
+    ganesha_conf_file = "/etc/ganesha/ganesha.conf"
+    with installer_node.remote_file(sudo=True, file_name=ganesha_conf_file, file_mode="w") as _f:
+        _f.write(ganesha_conf)
+
+    # Restart Ganesha
+    cmd = f"nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf -L /var/log/ganesha.log"
+    installer_node.exec_command(sudo=True, cmd=cmd)
+
+    # Check if ganesha service is up
+    cmd = "pgrep ganesha"
+    out = installer_node.exec_command(sudo=True, cmd=cmd)
+    pid = out[0].strip()
+    if not pid:
+        raise OperationFailedError("Failed to restart nfs service")
+
+
 
     # Get the mount versions specific to clients
     mount_versions = _get_client_specific_mount_versions(version, clients)
@@ -131,8 +146,8 @@ EXPORT {
                 mount=nfs_mount,
                 version=version,
                 port=port,
-                server=nfs_server,
-                export=f"{export}_{i}",
+                server=installer_node.ip_address,
+                export=f"nfs_{i}",
             ):
                 raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
             i += 1

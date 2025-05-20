@@ -1,0 +1,22 @@
+#===============================================================================================
+#-------------------------------------
+#---    Test Suite for Nfs Ganesha vers 4.2---
+#-------------------------------------
+# Conf: conf/squid/nfs/1admin-7node-3client.yaml
+# Smoke test cases for
+#    - Bootstrap
+#    - Host management
+#    - Configure nfs-ganesha on nfs server,do mount on any client and do IOs
+#    - Test tier1 scenarios
+#
+#===============================================================================================
+tests:
+
+  - test:
+      name: Nfs run LTP tests
+      module: upstream_nfs_iozone.py
+      desc: Verify LTP tests on nfs ganesha
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1

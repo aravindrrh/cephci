@@ -1,0 +1,54 @@
+#===============================================================================================
+#-------------------------------------
+#---    Test Suite for Nfs Ganesha vers 4.2---
+#-------------------------------------
+# Conf: conf/squid/nfs/1admin-7node-3client.yaml
+# Smoke test cases for
+#    - Bootstrap
+#    - Host management
+#    - Configure nfs-ganesha on nfs server,do mount on any client and do IOs
+#    - Test tier1 scenarios
+#
+#===============================================================================================
+tests:
+
+  - test:
+      name: Setup Upstream NFS and Ceph
+      module: nfs_run_spectrum_scale_upstream.py
+      abort-on-fail: true
+
+  - test:
+      name: NFS Upstream Ganesha Spectrum Scale run with file ops in loop
+      module: nfs_run_spectrum_scale_upstream_file_ops_in_loop.py
+      desc:  NFS Upstream Ganesha Spectrum Scale run with file ops in loop
+      abort-on-fail: false
+
+  - test:
+      name: NFS Upstream Ganesha Spectrum Scale run with node recycle
+      module: nfs_run_spectrum_scale_upstream_random_node_recycle.py
+      desc:  NFS Upstream Ganesha Spectrum Scale run with node recycle
+      abort-on-fail: false
+
+  - test:
+      name: NFS Upstream Ganesha Spectrum Scale run with read and overlapping lock
+      module: nfs_run_spectrum_scale_upstream_read_with_overlapping_lock.py
+      desc:  NFS Upstream Ganesha Spectrum Scale run with read and overlapping lock
+      abort-on-fail: false
+
+  - test:
+      name: NFS Upstream Ganesha Spectrum Scale run with write and overlapping lock
+      module: nfs_run_spectrum_scale_upstream_write_with_overlapping_lock.py
+      desc:  NFS Upstream Ganesha Spectrum Scale run with write and overlapping lock
+      abort-on-fail: false
+
+  - test:
+      name: NFS Upstream Ganesha Spectrum Scale run with write and overlapping lock
+      module: nfs_run_spectrum_scale_upstream_write_with_overlapping_lock.py
+      desc:  NFS Upstream Ganesha Spectrum Scale run with write and overlapping lock
+      abort-on-fail: false
+
+  - test:
+      name: NFS Upstream Ganesha Spectrum Scale run all scenarios
+      module: nfs_run_spectrum_scale_upstream_crash_scenarios.py
+      desc:  NFS Upstream Ganesha Spectrum Scale run all scenarios
+      abort-on-fail: false
