@@ -1,13 +1,13 @@
 ##############################################################################################
 # Tier-Level: 1
-# Test-Suite: tier1-nfs-ganesha-upgrade-ibm-8x-to-9x-latest.yaml
-# Scenario: Upgrade IBM 8.x(GA) cluster to IBM 9(Latest) with NFS-Ganesha in RHEL9
+# Test-Suite: tier1-nfs-ganesha-upgrade-8x-to-9x-latest.yaml
+# Scenario: Upgrade Ceph 8.x(GA) cluster to Ceph 9(Latest) with NFS-Ganesha in RHEL9
 #
 # Cluster Configuration: Conf: conf/squid/nfs/1admin-3client-7node.yaml
 #
 # Test Steps:
-# - Deploy IBM 8.x(GA) cluster in RHEL 9
-# - Deploy IBM 8.x client
+# - Deploy Ceph 8.x(GA) cluster in RHEL 9
+# - Deploy Ceph 8.x client
 # - Upgrade cluster along with NFS-Ganesha IOs parllel
 ################################################################################################
 tests:
@@ -18,8 +18,8 @@ tests:
       abort-on-fail: true
 
   - test:
-      name: Bootstrap IBM 8.x(GA) cluster and deploy services with label placements.
-      desc: Bootstrap IBM 8.x(GA) cluster and deploy services with label placements.
+      name: Bootstrap Ceph 8.x(GA) cluster and deploy services with label placements.
+      desc: Bootstrap Ceph 8.x(GA) cluster and deploy services with label placements.
       polarion-id: CEPH-83573777
       module: test_cephadm.py
       config:
@@ -29,8 +29,8 @@ tests:
               command: bootstrap
               service: cephadm
               args:
-                custom_image: "cp.stg.icr.io/cp/ibm-ceph/ceph-8-rhel9:latest"
-                custom_repo: "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-8-rhel-9.repo"
+                rhcs-version: 8.0
+                release: rc
                 mon-ip: node1
                 orphan-initial-daemons: true
                 skip-monitoring-stack: true
@@ -178,7 +178,7 @@ tests:
         setup: false
 
   - test:
-      name: nfs multiple operations - pre_upgrade
+      name: Nfsv4 multiple operations - pre_upgrade
       module: test_nfs_multiple_operations_for_upgrade.py
       desc: nfs multiple operations before upgrade create, delete, write, read, rename
       polarion-id: CEPH-83620035
@@ -191,15 +191,14 @@ tests:
         dd_command_size_in_M: 10
         operation: before_upgrade
 
-
   - test:
       name: Upgrade along with IOs for nfs
       module: test_parallel.py
       desc: Upgrade along with IOs for nfs in parallel
       parallel:
         - test:
-            name: Upgrade cluster to latest IBM 9.x
-            desc: Upgrade cluster to latest IBM 9.x
+            name: Upgrade cluster to latest Ceph 9.x
+            desc: Upgrade cluster to latest Ceph 9.x
             module: test_cephadm_upgrade.py
             polarion-id: CEPH-83573791,CEPH-83573790
             config:
@@ -222,9 +221,10 @@ tests:
               dd_command_size_in_M: 10
               exports_number: 4
               loop_count: 4
+      abort-on-fail: true
 
   - test:
-      name: nfs multiple operations - post_upgrade
+      name: NFSv4 multiple operations - post_upgrade
       module: test_nfs_multiple_operations_for_upgrade.py
       desc: nfs multiple operations after upgrade create, delete, write, read, rename
       polarion-id: CEPH-83620035
@@ -248,7 +248,7 @@ tests:
         clients: 4
 
   - test:
-      name: Nfs Verify read write operation permissions
+      name: Nfsv4 Verify read write operation permissions
       module: nfs_verify_read_write_operations.py
       desc: Perform read write without permissions on nfs share
       polarion-id: CEPH-83575941
@@ -259,13 +259,24 @@ tests:
         operation: verify_permission
 
   - test:
+      name: Nfsv3 Verify read write operation permissions
+      module: nfs_verify_read_write_operations.py
+      desc: Perform read write without permissions on nfs share
+      polarion-id: CEPH-83575941
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 3
+        operation: verify_permission
+
+  - test:
       name: Nfs verify read and write non existing file
       module: nfs_verify_read_write_operations.py
       desc: Perform read write of no existing file on nfs share
       polarion-id: CEPH-83575927
       abort-on-fail: false
       config:
-        nfs_version: 4.1
+        nfs_version: 3
         clients: 3
         operation: verify_non_existing_file
 
@@ -290,3 +301,10 @@ tests:
         clients: 3
         num_files: 1000
         num_dirs: 1000
+
+  - test:
+      name: Scrub Investigate
+      module: test_scrub_investigate.py
+      desc: Deploy cluster to test scrubbing
+      config:
+        sleep-duration: 7200
