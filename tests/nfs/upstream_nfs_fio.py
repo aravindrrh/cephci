@@ -24,7 +24,7 @@ def run (ceph_cluster, **kw):
 
         cmds = ["rm -rf ci-tests/",
                 "dnf -y install git wget gcc nfs-utils time make",
-                "git clone https://github.com/pranavprakash20/ci-tests.git; cd ci-tests; git checkout scale_downstream",
+                "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
                 "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
 
         for cmd in cmds:

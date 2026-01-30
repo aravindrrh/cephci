@@ -19,7 +19,7 @@ def run(ceph_cluster, **kw):
     else:
         cmds = ["rm -rf ci-tests/",
                 "yum install -y git wget",
-                "git clone https://github.com/pranavprakash20/ci-tests.git; cd ci-tests; git checkout scale_downstream",
+                "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
                 "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
 
         for cmd in cmds:
@@ -29,7 +29,7 @@ def run(ceph_cluster, **kw):
             f'echo "export EXPORT=\"{export_name}\"" >> ~/.bashrc && source ~/.bashrc',
             "rm -rf ci-tests/",
             "yum install -y git wget",
-            "git clone https://github.com/pranavprakash20/ci-tests.git; cd ci-tests; git checkout scale_downstream",
+            "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
             "sh ci-tests/build_scripts/pynfs/client.sh"]
 
     for cmd in cmds:

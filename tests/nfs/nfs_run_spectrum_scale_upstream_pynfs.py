@@ -14,7 +14,7 @@ def run(ceph_cluster, **kw):
 
     cmds = ["rm -rf ci-tests/",
             "yum install -y git wget",
-            "git clone https://github.com/pranavprakash20/ci-tests.git; cd ci-tests; git checkout scale_downstream",
+            "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
             "sh ci-tests/build_scripts/common/basic-storage-scale-custom-repo.sh",
             f'echo "export SERVER=\"{server.ip_address}\"" >> ~/.bashrc && source ~/.bashrc',
             f'echo "export EXPORT=\"/ibm/scale_volume\"" >> ~/.bashrc && source ~/.bashrc',
@@ -46,7 +46,7 @@ def run(ceph_cluster, **kw):
     #                "rm -rf ci-tests/",
     #                "yum install -y git wget",
     #                f'echo "export SERVER=\"{client.ip_address}\"" >> ~/.bashrc && source ~/.bashrc',
-    #                "git clone https://github.com/pranavprakash20/ci-tests.git; cd ci-tests; git checkout scale_downstream",
+    #                "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
     #               "sh ci-tests/build_scripts/storage-scale/client.sh"]
     # for cmd in client_cmds:
     #     client.exec_command(cmd=cmd, sudo=True, long_running=True)

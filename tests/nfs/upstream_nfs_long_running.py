@@ -14,7 +14,7 @@ def run(ceph_cluster, **kw):
 
     cmds = ["rm -rf ci-tests/",
             "yum install -y git wget",
-            "git clone https://github.com/pranavprakash20/ci-tests.git; cd ci-tests; git checkout scale_downstream",
+            "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
             "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
 
     for cmd in cmds:
@@ -25,7 +25,7 @@ def run(ceph_cluster, **kw):
             f'echo "export EXPORT=\"/ibm/scale_volume\"" >> ~/.bashrc && source ~/.bashrc',
             "rm -rf ci-tests/",
             "yum install -y git wget",
-            "git clone https://github.com/pranavprakash20/ci-tests.git; cd ci-tests; git checkout scale_downstream",
+            "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
             "sh ci-tests/build_scripts/storage-scale/long_running_tests.sh"]
 
     for cmd in cmds:
