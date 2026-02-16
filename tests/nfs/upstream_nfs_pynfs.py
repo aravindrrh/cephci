@@ -20,7 +20,8 @@ def run(ceph_cluster, **kw):
         cmds = ["rm -rf ci-tests/",
                 "yum install -y git wget",
                 "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
-                "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
+                # "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
+                "sh ci-tests/build_scripts/common/basic-storage-scale-multi-node.sh"]
 
         for cmd in cmds:
             server.exec_command(cmd=cmd, sudo=True, long_running=True, timeout=7200)
