@@ -124,7 +124,9 @@ def setup_nfs_cluster(
     if 3 in mount_versions.keys():
         ports_to_open = ["portmapper", "mountd"]
         for nfs_node in nfs_nodes:
-            open_mandatory_v3_ports(nfs_node, ports_to_open)
+            if nfs_node.hostname in nfs_server:
+                open_mandatory_v3_ports(nfs_node, ports_to_open)
+    # ceph nfs cluster create nfs_test "1 node1 node2"
     if isinstance(nfs_server, list):
         nfs_server = nfs_server[0]
     if ha:
