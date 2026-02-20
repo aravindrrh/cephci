@@ -103,6 +103,11 @@ class CephAdmin(BootstrapMixin, ShellMixin, RegistryLoginMixin):
         cloud_type = self.config.get("cloud-type", "openstack")
         logger.info(f"cloud type is {cloud_type}")
 
+        for node in self.cluster.get_nodes():
+            node.exec_command(
+                sudo=True,
+                cmd="dnf remove thrift -y"
+            )
         hotfix_repo = self.config.get("hotfix_repo")
         base_url = self.config["base_url"]
         if hotfix_repo:
@@ -113,6 +118,7 @@ class CephAdmin(BootstrapMixin, ShellMixin, RegistryLoginMixin):
                         sn=node.shortname,
                     )
                 )
+
                 node.exec_command(
                     sudo=True,
                     cmd="curl -o /etc/yum.repos.d/rh_hotfix_repo.repo {repo}".format(
