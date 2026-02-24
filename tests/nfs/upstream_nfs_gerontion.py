@@ -1,5 +1,7 @@
-from utility.log import Log
 from os import environ
+
+from cli.exceptions import OperationFailedError
+from utility.log import Log
 
 log = Log(__name__)
 
@@ -21,7 +23,13 @@ def run (ceph_cluster, **kw):
                     "git clone https://github.com/pranavprakash20/ci-tests.git; cd ci-tests; git checkout scale_downstream",
                     "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
             for cmd in cmds:
-                server.exec_command(cmd=cmd, sudo=True, long_running=True,)
+                exit_code = server.exec_command(
+                    cmd=cmd, sudo=True, long_running=True,
+                )
+                if exit_code != 0:
+                    raise OperationFailedError(
+                        f"Gerontion server command failed (exit {exit_code}): {cmd}"
+                    )
 
         # Copy Gerontion folder to all the clients
         for client in clients:
@@ -72,9 +80,11 @@ def run (ceph_cluster, **kw):
             log.info(f"Test: Blast, Mount : {mount}, result : {out}")
 
 
+    except OperationFailedError:
+        raise
     except Exception as e:
-        log.error(f"Error : {e}")
-        return 1
+        log.error("Gerontion setup/run failed: %s", e)
+        raise OperationFailedError(f"Gerontion setup/run failed: {e}") from e
     finally:
         pass
     return 0

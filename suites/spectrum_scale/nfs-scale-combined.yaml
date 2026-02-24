@@ -1,0 +1,58 @@
+#===============================================================================================
+# Combined suite: basic (setup), cthon, fio, lock-test, ltp, pjdfs
+# Single VM deployment; all tests run in sequence to reduce deployment time.
+#----------------------------------------------------------------------------------------------
+# Conf: conf/squid/nfs/1admin-7node-3client.yaml (or equivalent)
+#===============================================================================================
+tests:
+
+  - test:
+      name: Setup NFS Upstream Ganesha Spectrum Scale
+      module: nfs_run_spectrum_scale_upstream.py
+      desc: Bootstrap and configure NFS Ganesha with Spectrum Scale
+      abort-on-fail: true
+
+  - test:
+      name: Nfs run Cthon Tests
+      module: upstream_nfs_cthon.py
+      desc: Verify Cthon tests on nfs ganesha with Scale FSAL
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs run FIO tests
+      module: upstream_nfs_fio.py
+      desc: Verify FIO tests on nfs ganesha with GPFS Fsal
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs run Lock tests
+      module: upstream_nfs_lock_test.py
+      desc: Verify Lock tests (nfs tests) on nfs with scale FSAL
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs run LTP tests
+      module: upstream_nfs_ltp.py
+      desc: Verify LTP tests on nfs ganesha with Scale FSAL from two clients. V3 from c1 and v4 from c2
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs run PJDFS Tests
+      module: upstream_nfs_pjdfs.py
+      desc: Verify PJDFS tests on nfs ganesha with Scale FSAL from two clients. V3 from c1 and v4 from c2
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1

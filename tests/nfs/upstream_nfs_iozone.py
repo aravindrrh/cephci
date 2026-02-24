@@ -1,5 +1,7 @@
-from utility.log import Log
 from os import environ
+
+from cli.exceptions import OperationFailedError
+from utility.log import Log
 
 log = Log(__name__)
 
@@ -21,8 +23,13 @@ def run (ceph_cluster, **kw):
                     "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
                     "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
             for cmd in cmds:
-                server.exec_command(cmd=cmd, sudo=True, long_running=True,)
-
+                exit_code = server.exec_command(
+                    cmd=cmd, sudo=True, long_running=True,
+                )
+                if exit_code != 0:
+                    raise OperationFailedError(
+                        f"Iozone server command failed (exit {exit_code}): {cmd}"
+                    )
 
         # Install pre-req
         cmd = "sudo dnf install -y wget git gcc gcc-c++ time make automake autoconf " \
@@ -81,16 +88,26 @@ def run (ceph_cluster, **kw):
                     iozone_cmd += f" {io_path}"
 
             cmd = f"cd {nfs_mount};{iozone_cmd}"
-            clients[0].exec_command(
+            exit_code = clients[0].exec_command(
                 sudo=True,
                 cmd=cmd,
                 long_running=True,
                 timeout=7200
             )
+            if exit_code != 0:
+                log.error(
+                    "Iozone client command failed with exit code %s: %s",
+                    exit_code, cmd,
+                )
+                raise OperationFailedError(
+                    f"Iozone client command failed (exit {exit_code}): {cmd}"
+                )
 
+    except OperationFailedError:
+        raise
     except Exception as e:
-        log.error(f"Error : {e}")
-        return 1
+        log.error("Iozone setup/run failed: %s", e)
+        raise OperationFailedError(f"Iozone setup/run failed: {e}") from e
     finally:
         pass
     return 0

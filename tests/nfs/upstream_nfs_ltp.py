@@ -1,5 +1,7 @@
-from utility.log import Log
 from os import environ
+
+from cli.exceptions import OperationFailedError
+from utility.log import Log
 
 log = Log(__name__)
 
@@ -24,7 +26,13 @@ def run(ceph_cluster, **kw):
                     "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
 
             for cmd in cmds:
-                server.exec_command(cmd=cmd, sudo=True, long_running=True, timeout=3600)
+                exit_code = server.exec_command(
+                    cmd=cmd, sudo=True, long_running=True, timeout=3600
+                )
+                if exit_code != 0:
+                    raise OperationFailedError(
+                        f"LTP server command failed (exit {exit_code}): {cmd}"
+                    )
 
         # Perform mount on client
         cmds = ["dnf -y install git wget gcc nfs-utils time make",
@@ -69,9 +77,11 @@ def run(ceph_cluster, **kw):
               "-o /tmp/ltp_output_v4.log -l /tmp/ltp_run_v4.log -p"
         clients[1].exec_command(cmd=cmd, sudo=True, timeout=10400)
 
+    except OperationFailedError:
+        raise
     except Exception as e:
-        log.error(f"Error : {e}")
-        return 1
+        log.error("LTP setup/run failed: %s", e)
+        raise OperationFailedError(f"LTP setup/run failed: {e}") from e
     finally:
         # sleep(30)
         # view test results

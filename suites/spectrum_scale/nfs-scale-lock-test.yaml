@@ -13,7 +13,7 @@
 tests:
 
   - test:
-      name: Nfs run LTP tests
+      name: Nfs run Lock tests
       module: upstream_nfs_lock_test.py
       desc: Verify Lock tests (nfs tests) on nfs with scale FSAL
       abort-on-fail: false

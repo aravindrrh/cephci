@@ -1,3 +1,4 @@
+from cli.exceptions import OperationFailedError
 from utility.log import Log
 
 log = Log(__name__)
@@ -28,7 +29,13 @@ def run (ceph_cluster, **kw):
                 "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
 
         for cmd in cmds:
-            server.exec_command(cmd=cmd, sudo=True, long_running=True, timeout="notimeout")
+            exit_code = server.exec_command(
+                cmd=cmd, sudo=True, long_running=True, timeout="notimeout"
+            )
+            if exit_code != 0:
+                raise OperationFailedError(
+                    f"FIO server command failed (exit {exit_code}): {cmd}"
+                )
 
         # Perform mount on client
         cmds = ["mkdir -p /mnt/nfsv3",
@@ -114,9 +121,11 @@ numjobs=4"""
         cmd = f"cat {output}"
         out, _ = clients[0].exec_command(cmd=cmd, sudo=True)
 
+    except OperationFailedError:
+        raise
     except Exception as e:
-        log.error(f"Error : {e}")
-        return 1
+        log.error("FIO run failed: %s", e)
+        raise OperationFailedError(f"FIO run failed: {e}") from e
     finally:
         pass
     return 0
