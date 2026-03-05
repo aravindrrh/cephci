@@ -25,6 +25,7 @@ def run(ceph_cluster, **kw):
                     "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
                     "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
 
+
             for cmd in cmds:
                 exit_code = server.exec_command(
                     cmd=cmd, sudo=True, long_running=True, timeout=3600
@@ -55,26 +56,31 @@ def run(ceph_cluster, **kw):
 
         # clone LTP
         cmd = "git clone https://github.com/linux-test-project/ltp.git"
+        cmd += " && git clone https://github.com/linux-test-project/kirk.git"
         clients[0].exec_command(cmd=cmd, sudo=True)
         clients[1].exec_command(cmd=cmd, sudo=True)
 
         # Build LTP
         cmd = "cd ltp;make autotools;./configure;make -j$(nproc);sudo make install"
-        clients[0].exec_command(cmd=cmd, sudo=True)
-        clients[1].exec_command(cmd=cmd, sudo=True)
+        clients[0].exec_command(cmd=cmd, sudo=True, timeout=600)
+        clients[1].exec_command(cmd=cmd, sudo=True, timeout=600)
 
-        # Run LTP test
+        # Run LTP test (kirk is the current test runner; runltp was removed)
         v3_mount = "/mnt/nfsv3"
         v4_mount = "/mnt/nfsv4"
 
         log.info("Running LTP on v3 mount")
-        cmd = f"cd /opt/ltp; sudo ./runltp -d {v3_mount} -f fs " \
-              "-o /tmp/ltp_output_v3.log -l /tmp/ltp_run_v3.log -p"
+        cmd = (
+            f"sudo sh -c 'cd ~/kirk && TMPDIR={v3_mount} ./kirk -f fs 2>&1 -d {v3_mount}"
+            "| tee /tmp/ltp_run_v3.log > /tmp/ltp_output_v3.log'"
+        )
         clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
 
         log.info("Running LTP on v4 mount")
-        cmd = f"cd /opt/ltp; sudo ./runltp -d {v4_mount} -f fs " \
-              "-o /tmp/ltp_output_v4.log -l /tmp/ltp_run_v4.log -p"
+        cmd = (
+            f"sudo sh -c 'cd ~/kirk && TMPDIR={v4_mount} ./kirk -f fs 2>&1 -d {v4_mount}"
+            "| tee /tmp/ltp_run_v4.log > /tmp/ltp_output_v4.log'"
+        )
         clients[1].exec_command(cmd=cmd, sudo=True, timeout=10400)
 
     except OperationFailedError:
