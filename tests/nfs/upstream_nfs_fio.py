@@ -75,7 +75,7 @@ bs=4k
 numjobs=4"""
         filepath = "/mnt/nfsv3/ganesha_test.fio"
         cmd = f"cat <<'EOF' > {filepath}\n{fio_job_content}\nEOF"
-        clients[0].exec_command(cmd=cmd)
+        clients[0].exec_command(cmd=cmd, sudo=True)
 
         # Run on V3
         log.info("Running FIO on V3")
@@ -110,7 +110,7 @@ bs=4k
 numjobs=4"""
         filepath = "/mnt/nfsv4/ganesha_test.fio"
         cmd = f"cat <<'EOF' > {filepath}\n{fio_job_content}\nEOF"
-        clients[0].exec_command(cmd=cmd)
+        clients[0].exec_command(cmd=cmd, sudo=True)
 
         # Run on V4
         log.info("Running FIO on V4")
