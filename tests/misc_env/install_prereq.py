@@ -52,6 +52,7 @@ rpm_packages = {
         "net-tools",
         "lvm2",
         "podman",
+        "rpcbind",
         "net-snmp-utils",
         "net-snmp",
         "kernel-modules-extra",
@@ -141,11 +142,18 @@ def install_prereq(
     ceph.exec_command(cmd=cmd_remove_apache_arrow)
 
     # Max SSH Sessions
-    sshd_configs = [
-        "sed -i '/MaxSessions*/d' /etc/ssh/sshd_config",
-        "echo 'MaxSessions 150' | tee -a /etc/ssh/sshd_config",
-        "systemctl restart sshd",
-    ]
+    if cloud_type == "onecloud":
+        sshd_configs = [
+            "sed -i '/MaxSessions*/d' /etc/ssh/sshd_config",
+            "echo 'MaxSessions 150' | tee -a /etc/ssh/sshd_config",
+            "systemctl restart sshd",
+        ]
+    else:
+        sshd_configs = [
+            "sudo sed -i '/MaxSessions*/d' /etc/ssh/sshd_config",
+            "echo 'MaxSessions 150' | sudo tee -a /etc/ssh/sshd_config",
+            "sudo systemctl restart sshd",
+        ]
     for sshd_cfg in sshd_configs:
         ceph.exec_command(cmd=sshd_cfg, sudo=True)
 
@@ -229,7 +237,7 @@ def install_prereq(
         ceph.exec_command(cmd="sudo yum clean all")
         config_ntp(ceph, cloud_type)
 
-    registry_login(ceph, distro_ver, test_data)
+    registry_login(ceph, distro_ver, test_data, cloud_type=cloud_type)
     update_iptables(ceph)
 
     if not fips_mode:
@@ -331,6 +339,7 @@ def enable_rhel_rpms(ceph, distro_ver):
         ceph:       cluster instance
         distro_ver: distro version details
     """
+    sm_cmd = "subscription-manager"
 
     repos = {
         "7": ["rhel-7-server-rpms", "rhel-7-server-extras-rpms"],
@@ -338,12 +347,12 @@ def enable_rhel_rpms(ceph, distro_ver):
         "9": ["rhel-9-for-x86_64-appstream-rpms", "rhel-9-for-x86_64-baseos-rpms"],
     }
 
-    ceph.exec_command(sudo=True, cmd=f"subscription-manager release --set {distro_ver}")
+    ceph.exec_command(sudo=True, cmd=f"{sm_cmd} release --set {distro_ver}")
 
     for repo in repos.get(distro_ver[0]):
         ceph.exec_command(
             sudo=True,
-            cmd="subscription-manager repos --enable={r}".format(r=repo),
+            cmd="{sm_cmd} repos --enable={r}".format(sm_cmd=sm_cmd, r=repo),
             long_running=True,
         )
 
@@ -356,13 +365,14 @@ def enable_rhel_eus_rpms(ceph, distro_ver):
         distro_ver:     distro version - example: 7.7
         ceph:           ceph object
     """
+    sm_cmd = "subscription-manager"
 
     eus_repos = {"7": ["rhel-7-server-eus-rpms", "rhel-7-server-extras-rpms"]}
 
     for repo in eus_repos.get(distro_ver[0]):
         ceph.exec_command(
             sudo=True,
-            cmd="subscription-manager repos --enable={r}".format(r=repo),
+            cmd="{sm_cmd} repos --enable={r}".format(sm_cmd=sm_cmd, r=repo),
             long_running=True,
         )
 
@@ -374,7 +384,7 @@ def enable_rhel_eus_rpms(ceph, distro_ver):
     else:
         raise NotImplementedError("cannot set EUS repos for %s", rhel_major_version)
 
-    cmd = f"subscription-manager release --set={release}"
+    cmd = f"{sm_cmd} release --set={release}"
 
     ceph.exec_command(
         sudo=True,
@@ -385,7 +395,7 @@ def enable_rhel_eus_rpms(ceph, distro_ver):
     ceph.exec_command(sudo=True, cmd="yum clean all", long_running=True)
 
 
-def registry_login(ceph, distro_ver, test_data=None):
+def registry_login(ceph, distro_ver, test_data=None, cloud_type="openstack"):
     """
     Login to the given Container registries provided in the configuration.
 

@@ -26,6 +26,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from jinja_markdown import MarkdownExtension
 from reportportal_client import ReportPortalService
 
+from cli.exceptions import ConfigError
 from utility.log import Log
 
 log = Log(__name__)
@@ -1830,7 +1831,149 @@ def configure_kafka_security(rgw_node, cloud_type):
         + f" || sed -i 's|podman run|podman run -v /usr/local/kafka:/usr/local/kafka|' {unit_run_path}",
     )
 
-    # restart rgw service
+
+def configure_kafka_cluster_with_security(ceph_cluster, cloud_type):
+    """setup kafka cluster with zookeeper and kafka running on all rgw nodes. configure kafka broker security as well"""
+    log.info("deploying kafka cluster")
+    rgw_nodes = ceph_cluster.get_ceph_objects("rgw")
+
+    # install kafka on all rgw nodes.
+    zookeeper_properties_str = (
+        "tickTime=2000\ninitLimit=10\nsyncLimit=5\ndataDir=/usr/local/kafka/data/zookeeper"
+        + "\nclientPort=2181\nmaxClientCnxns=0\nadmin.enableServer=false"
+    )
+    zookeeper_connect_str = "zookeeper.connect="
+    zookeeper_id = 1  # zookeeper id starts from 1
+    for rgw_node_obj in rgw_nodes:
+        rgw_node = rgw_node_obj.node
+        log.info(f"installing kafka on node {rgw_node.ip_address}")
+        rgw_node.exec_command(
+            sudo=True,
+            cmd="yum install -y https://download.oracle.com/java/25/latest/jdk-25_linux-x64_bin.rpm",
+        )
+        install_kafka(rgw_node, cloud_type)
+        rgw_node.exec_command(
+            sudo=True, cmd="mkdir -p /usr/local/kafka/data/zookeeper/"
+        )
+        rgw_node.exec_command(
+            sudo=True,
+            cmd=f"echo '{zookeeper_id}' > /usr/local/kafka/data/zookeeper/myid",
+        )
+        zookeeper_properties_str = f"{zookeeper_properties_str}\nserver.{zookeeper_id}={rgw_node.ip_address}:2888:3888"
+        zookeeper_connect_str = f"{zookeeper_connect_str}{rgw_node.ip_address}:2181,"
+        zookeeper_id = zookeeper_id + 1
+    # remove redundant last comma
+    zookeeper_connect_str = zookeeper_connect_str[:-1]
+
+    # configure kafka on rgw node1
+    rgw_node1_obj = rgw_nodes.pop(0)
+    rgw_node1 = rgw_node1_obj.node
+    rgw_node1_ip = rgw_node1.ip_address
+    setup_server_properties_security_configs(rgw_node1, cloud_type)
+    setup_keystore_certs(rgw_node1, cloud_type)
+    rgw_node1.exec_command(
+        sudo=True,
+        cmd=f"echo '{zookeeper_properties_str}' > /usr/local/kafka/config/zookeeper.properties",
+    )
+    rgw_node1.exec_command(
+        sudo=True,
+        cmd=f"sed -i 's|zookeeper.connect=localhost:2181|{zookeeper_connect_str}|'"
+        + f" {KAFKA_HOME}/config/server.properties",
+    )
+    start_zookeeper_service(rgw_node1)
+
+    # setup kafka on other rgw nodes similar to kafka setup on rgw node1
+    listener_string_old = (
+        f"listeners=PLAINTEXT://{rgw_node1_ip}:9092,SSL://{rgw_node1_ip}:9093,"
+        + f"SASL_SSL://{rgw_node1_ip}:9094,SASL_PLAINTEXT://{rgw_node1_ip}:9095"
+    )
+    broker_id = (
+        1  # broker_id is by default 0, so from node2 onwards broker_id starts from 1
+    )
+    rgw_node1.exec_command(sudo=True, cmd="sudo yum install -y sshpass")
+    for rgw_node_obj in rgw_nodes:
+        rgw_node = rgw_node_obj.node
+        rgw_node_ip = rgw_node.ip_address
+        # copy configured server.properties and zookeeper.properties from rgw node1 to current rgw mode
+        rgw_node1.exec_command(
+            sudo=True,
+            cmd="sshpass -p 'passwd'"
+            + f" scp -o StrictHostKeyChecking=no {KAFKA_HOME}/config/zookeeper.properties"
+            + f" root@{rgw_node_ip}:{KAFKA_HOME}/config/zookeeper.properties",
+        )
+        rgw_node1.exec_command(
+            sudo=True,
+            cmd="sshpass -p 'passwd'"
+            + f" scp -o StrictHostKeyChecking=no {KAFKA_HOME}/config/server.properties"
+            + f" root@{rgw_node_ip}:{KAFKA_HOME}/config/server.properties",
+        )
+
+        # copy keystore, truststore and certs used for kafka security to other rgw node
+        rgw_node1.exec_command(
+            sudo=True,
+            cmd="sshpass -p 'passwd'"
+            + f" scp -o StrictHostKeyChecking=no server.truststore.jks server.keystore.jks  root@{rgw_node_ip}:~/",
+        )
+        rgw_node1.exec_command(
+            sudo=True,
+            cmd="sshpass -p 'passwd'"
+            + f" scp -o StrictHostKeyChecking=no {KAFKA_HOME}/localhost.crt {KAFKA_HOME}/localhost.req"
+            + f" {KAFKA_HOME}/y-ca.crt  {KAFKA_HOME}/y-ca.key {KAFKA_HOME}/y-ca.srl"
+            + f" root@{rgw_node_ip}:/usr/local/kafka/",
+        )
+        # overwrite broker_id from 0 to current broker_id
+        rgw_node.exec_command(
+            sudo=True,
+            cmd=f"sed -i 's|broker.id=0|broker.id={broker_id}|' {KAFKA_HOME}/config/server.properties",
+        )
+        # overwrite listener with current rgw node ip
+        listener_string_new = (
+            f"listeners=PLAINTEXT://{rgw_node_ip}:9092,SSL://{rgw_node_ip}:9093,"
+            + f"SASL_SSL://{rgw_node_ip}:9094,SASL_PLAINTEXT://{rgw_node_ip}:9095"
+        )
+        rgw_node.exec_command(
+            sudo=True,
+            cmd=f"sed -i 's|{listener_string_old}|{listener_string_new}|' {KAFKA_HOME}/config/server.properties",
+        )
+        # start zookeeper service
+        start_zookeeper_service(rgw_node)
+        broker_id = broker_id + 1
+
+    # wait for zookeeper service to start
+    time.sleep(30)
+
+    rgw_nodes.insert(0, rgw_node1_obj)
+    for rgw_node_obj in rgw_nodes:
+        rgw_node = rgw_node_obj.node
+        # start kafka service
+        start_kafka_broker(rgw_node)
+        # wait for kafka service to start
+        time.sleep(30)
+
+    # add kafka configs for user alice so that sasl security mechanism works
+    add_kafka_config_for_user(rgw_node1)
+
+    # redeploy rgw service so that kafka certs are mounted to rgw container to be used for authentication
+    redeploy_rgw_service_for_kafka_security(rgw_node1)
+
+
+def config_keystone_ldap(rgw_node, cloud_type):
+    """Set the keystone config option on the cluster at startup"""
+    cephci_config = get_cephci_config()
+    keystone_cfg = cephci_config.get("keystone", {})
+    ldap_cfg = cephci_config.get("ldap", {})
+    # OneCloud may share keystone/ldap with openstack; fallback if onecloud not configured
+    lookup = cloud_type if cloud_type in keystone_cfg else "openstack"
+    keystone_server = keystone_cfg.get(lookup, keystone_cfg.get("openstack", {})).get(
+        "url"
+    )
+    ldap_url = ldap_cfg.get(lookup, ldap_cfg.get("openstack", {})).get("url")
+    if not keystone_server or not ldap_url:
+        raise ConfigError(
+            f"keystone/ldap config missing for cloud_type '{cloud_type}'. "
+            "Add keystone.{cloud} and ldap.{cloud} to cephci config."
+        )
+
     out = rgw_node.exec_command(sudo=True, cmd="ceph orch ls | grep rgw")
     rgw_name = out[0].split()[0]
     rgw_node.exec_command(sudo=True, cmd=f"ceph orch restart {rgw_name}")
