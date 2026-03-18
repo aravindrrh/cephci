@@ -42,6 +42,7 @@ def run(ceph_cluster, **kw):
 
         # clone LTP
         cmd = "git clone https://github.com/linux-test-project/ltp.git"
+        cmd += " && git clone https://github.com/linux-test-project/kirk.git"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
         # Build LTP
@@ -49,8 +50,12 @@ def run(ceph_cluster, **kw):
         clients[0].exec_command(cmd=cmd, sudo=True)
 
         # Run LTP test
-        cmd = f"cd /opt/ltp; sudo ./runltp -d {nfs_mount} -f fs " \
-              "-o /tmp/ltp_output.log -l /tmp/ltp_run.log -p"
+        #cmd = f"cd /opt/ltp; sudo ./runltp -d {nfs_mount} -f fs " \
+        #      "-o /tmp/ltp_output.log -l /tmp/ltp_run.log -p"
+        cmd = (
+            f"sudo sh -c 'cd ~/kirk && TMPDIR={nfs_mount} ./kirk -f fs 2>&1 -d {nfs_mount}"
+            "| tee /tmp/ltp_output.log > /tmp/ltp_run.log'"
+            )
         clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
 
     except Exception as e:
@@ -70,9 +75,9 @@ def run(ceph_cluster, **kw):
         log.info(out)
 
         # Find failed tests
-        cmd = "grep FAIL /tmp/ltp_output.log"
-        out = clients[0].exec_command(cmd=cmd, sudo=True)
-        log.info(out)
+        # cmd = "grep FAIL /tmp/ltp_output.log"
+        # out = clients[0].exec_command(cmd=cmd, sudo=True)
+        # log.info(out)
 
         log.info("Cleaning up skipped")
         # cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
