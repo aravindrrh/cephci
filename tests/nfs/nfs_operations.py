@@ -10,6 +10,7 @@ from time import sleep
 import yaml
 from looseversion import LooseVersion
 
+from ceph.ceph import CommandFailed
 from ceph.waiter import WaitUntil
 from cli.ceph.ceph import Ceph
 from cli.cephadm.cephadm import CephAdm
@@ -27,6 +28,20 @@ setup_start_time = None
 
 class NfsCleanupFailed(Exception):
     pass
+
+
+def _cephadm_primary_node(node):
+    """
+    CephAdm with a list of nodes runs execute() per host and returns a dict keyed by
+    shortname, so orch.ls would not return JSON text. Use a single node for orch CLI.
+    """
+    if isinstance(node, list):
+        if not node:
+            raise OperationFailedError(
+                "Expected at least one node for CephAdm / ceph orch commands"
+            )
+        return node[0]
+    return node
 
 
 def setup_nfs_cluster(
@@ -241,11 +256,20 @@ def cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=None):
                 )
     nfs_log_parser(client=clients[0], nfs_node=nfs_nodes, nfs_name=nfs_name)
 
+    orch_client = clients[0]
+    nfs_orch_ok = nfs_ganesha_orch_healthy(orch_client)
+    if not nfs_orch_ok:
+        log.warning(
+            "NFS service not fully up per ceph orch (running != size); skipping "
+            "rm under %s to avoid hung I/O on stale mounts",
+            nfs_mount,
+        )
+
     for client in clients:
         # Clear the nfs_mount, at times rm operation can fail
         # as the dir is not empty, this being an expected behaviour,
         # the solution is to repeat the rm operation.
-        if not mount_cleanup_retry(client, nfs_mount):
+        if nfs_orch_ok and not mount_cleanup_retry(client, nfs_mount):
             raise NfsCleanupFailed(
                 "Failed to cleanup nfs mount dir even after multiple iterations. Timed out!"
             )
@@ -893,7 +917,9 @@ def delete_nfs_clusters_in_parallel(installer_node, timeout=300, clusters=None):
     # Check if any NFS Ganesha service is still running
     for w in WaitUntil(timeout=timeout, interval=5):
         result = json.loads(
-            CephAdm(installer_node).ceph.orch.ls(format="json", service_type="nfs")
+            CephAdm(_cephadm_primary_node(installer_node)).ceph.orch.ls(
+                format="json", service_type="nfs"
+            )
         )
         if all(x["status"]["running"] == 0 for x in result) or not result:
             log.info("sleep(10)  # Allow some time for the service to stabilize")
@@ -1012,8 +1038,9 @@ def mount_retry(client, mount_name, version, port, nfs_server, export_name):
     return True
 
 
-@retry(OperationFailedError, tries=5, delay=10, backoff=2)
+@retry((OperationFailedError, CommandFailed), tries=5, delay=10, backoff=2)
 def mount_cleanup_retry(client, mount_name):
+    # exec_command always runs via long_running(); timeouts raise CommandFailed.
     _, err = client.exec_command(sudo=True, cmd=f"rm -rf {mount_name}/*", timeout=120)
     if err:
         raise OperationFailedError("Failed to clenaup the mount directory")
@@ -1048,7 +1075,9 @@ def verify_nfs_ganesha_service(node, timeout):
 
     for w in WaitUntil(timeout=timeout, interval=interval):
         result = json.loads(
-            CephAdm(node).ceph.orch.ls(format="json", service_type="nfs")
+            CephAdm(_cephadm_primary_node(node)).ceph.orch.ls(
+                format="json", service_type="nfs"
+            )
         )
         if all(x["status"]["running"] == x["status"]["size"] for x in result):
             log.info(
@@ -1075,6 +1104,24 @@ def verify_nfs_ganesha_service(node, timeout):
         raise OperationFailedError(
             "NFS daemons check failed Timeout expired. -- %s seconds" % timeout
         )
+
+
+def nfs_ganesha_orch_healthy(client_node):
+    """
+    Return True if ceph orch reports every nfs service with running == size.
+
+    Used for cleanup decisions: rm under a hung NFS mount can block until timeout
+    when ganesha is down.
+    """
+    try:
+        raw = Ceph(client_node).orch.ls(format="json", service_type="nfs")
+        result = json.loads(raw)
+        if not result:
+            return False
+        return all(x["status"]["running"] == x["status"]["size"] for x in result)
+    except Exception as e:
+        log.warning("Could not determine NFS orch health: %s", e)
+        return False
 
 
 def create_multiple_nfs_instance_via_spec_file(

@@ -615,8 +615,8 @@ def _validate_single_client_ops(client, nfs_mount, file_name, dd_params):
     """Internal function to validate ops control on a single client."""
     try:
         # create test file
-        cmd = f"touch {nfs_mount}/{file_name}"
-        client.exec_command(sudo=True, cmd=cmd)
+        # cmd = f"touch {nfs_mount}/{file_name}"
+        # client.exec_command(sudo=True, cmd=cmd)
 
         # write test (redirect stderr to stdout to capture dd progress)
         write_cmd = (

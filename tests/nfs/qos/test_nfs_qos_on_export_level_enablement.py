@@ -5,7 +5,11 @@ from time import sleep
 from cli.ceph.ceph import Ceph
 from cli.cephadm.cephadm import CephAdm
 from cli.exceptions import ConfigError, OperationFailedError
-from tests.nfs.nfs_operations import cleanup_cluster, setup_nfs_cluster
+from tests.nfs.nfs_operations import (
+    cleanup_cluster,
+    setup_nfs_cluster,
+    verify_nfs_ganesha_service,
+)
 from tests.nfs.qos.test_nfs_qos_on_cluster_level_enablement import (
     _maybe_json_loads,
     _within_qos_limit,
@@ -254,8 +258,8 @@ def run(ceph_cluster, **kw):
             Ceph(client).orch.restart(service_name)
             if cluster_name not in [x["service_name"] for x in data]:
                 sleep(5)
-            # Waiting for QoS settings to load after cluster restart
-            sleep(20)
+            # Confirm NFS daemons are up; verify includes a short stabilization wait
+            verify_nfs_ganesha_service(installer, timeout=300)
 
             # Validate persistence for all exports
             for i in range(no_clients):
