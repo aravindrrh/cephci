@@ -63,7 +63,12 @@ def setup_nfs_cluster(
     version_info = installer_node.exec_command(
         sudo=True, cmd="cephadm shell -- rpm -qa | grep nfs"
     )
+    libntirpc_info = nstaller_node.exec_command(
+        sudo=True, cmd="cephadm shell -- rpm -qa | grep libntirpc"
+    )
     log.info("nfs info: %s", version_info)
+    log.info("libntirpc version %s", libntirpc_info)
+
     Ceph(clients[0]).mgr.module.enable(module="nfs", force=True)
     sleep(3)
 
