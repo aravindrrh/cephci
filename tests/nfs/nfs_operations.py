@@ -162,6 +162,35 @@ def setup_nfs_cluster(
         else:
             mount_servers = [servers[0]]
 
+    # Convert hostnames to IP addresses for mounting
+    mount_servers_ips = []
+    for server in mount_servers:
+        # Check if server is already an IP address
+        if re.match(r"^(\d{1,3}\.){3}\d{1,3}$", server):
+            mount_servers_ips.append(server)
+            log.info(f"Using IP address {server} for mounting")
+        else:
+            # Server is a hostname, resolve to IP
+            resolved = False
+            for nfs_node in nfs_nodes:
+                if nfs_node.hostname == server:
+                    node_ips = get_ip_from_node(nfs_node)
+                    if node_ips:
+                        # Use the first IP address (typically the primary interface)
+                        mount_servers_ips.append(node_ips[0])
+                        log.info(
+                            f"Resolved hostname {server} to IP {node_ips[0]} for mounting"
+                        )
+                        resolved = True
+                        break
+            if not resolved:
+                # Fallback to hostname if resolution fails
+                log.warning(f"Could not resolve {server} to IP, using hostname")
+                mount_servers_ips.append(server)
+
+    # Use resolved IPs for mounting
+    mount_servers = mount_servers_ips
+
     i = 0
     server_idx = 0
     for version, clients in mount_versions.items():
