@@ -33,12 +33,16 @@ def run (ceph_cluster, **kw):
 
         # Install pre-req
         cmd = "sudo dnf install -y wget git gcc gcc-c++ time make automake autoconf " \
-              "pkgconf pkgconf-pkg-config libtool bison flex " \
+              "openmpi openmpi-devel pkgconf pkgconf-pkg-config libtool bison flex " \
               "perl perl-Time-HiRes python3 wget tar libaio-devel net-tools nfs-utils"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        cmd = "sudo yum groupinstall -y Development Tools mpich mpich-devel;"
-        clients[0].exec_command(cmd=cmd, sudo=True)
+        cmds = ["subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms",
+                "sudo dnf groupinstall -y \"Development Tools\"",
+                "sudo dnf install -y mpich mpich-devel;"
+        ]
+        for cmd in cmds:
+            clients[0].exec_command(cmd=cmd, sudo=True)
 
         cmd = """{
     echo 'export CFLAGS="-I/usr/include/mpich-x86_64"'
@@ -48,10 +52,10 @@ def run (ceph_cluster, **kw):
 } >> ~/.bashrc"""
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        cmd = "source ~/.bashrc"
+        cmd = "source ~/.bashrc; source /etc/profile.d/modules.sh; module load mpi/openmpi-x86_64"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        cmd = """git clone https://github.com/hpc/ior.git;cd ior;./bootstrap;./configure;sudo make install"""
+        cmd = """git clone https://github.com/hpc/ior.git;cd ior; sed -i 's/^AC_PREREQ(\[2\.71\])/AC_PREREQ([2.69])/' configure.ac; ./bootstrap && ./configure && make install"""
         clients[0].exec_command(cmd=cmd, sudo=True)
 
         # Perform mount on client
