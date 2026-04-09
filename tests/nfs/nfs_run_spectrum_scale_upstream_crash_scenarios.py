@@ -137,12 +137,16 @@ for dir in "${DIRS[@]}"; do
    sleep 1
 done
 
-echo "All tests started. Press Ctrl+C to stop."
+echo "All tests started. Will run for 1 hour (3600 seconds)."
 
-# Keep script running to allow trap to catch signal
-while true; do
+# Keep script running for 1 hour, then cleanup
+END_TIME=$(($(date +%s) + 356))
+while [ $(date +%s) -lt $END_TIME ]; do
    sleep 1
-done"""
+done
+
+echo "1 hour elapsed. Cleaning up..."
+cleanup"""
     cmd = f"touch {mount_path}/run_all_tests.sh"
     server.exec_command(cmd=cmd, sudo=True, long_running=True)
     with server.remote_file(sudo=True, file_name=f"{mount_path}/run_all_tests.sh", file_mode="w") as _f:

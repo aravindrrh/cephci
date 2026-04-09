@@ -23,7 +23,10 @@ nodes=("storage-scale-ces-001" "storage-scale-ces-002" "storage-scale-ces-003")
 log_file="/var/log/nfs_restart.log"
 last_node=""
 
-while true; do
+# Set end time to 3560 seconds (approximately 1 hour) from now
+END_TIME=$(($(date +%s) + 356))
+
+while [ $(date +%s) -lt $END_TIME ]; do
    random_node=${nodes[$RANDOM % ${#nodes[@]}]}
 
    # Avoid selecting the same node twice in a row
