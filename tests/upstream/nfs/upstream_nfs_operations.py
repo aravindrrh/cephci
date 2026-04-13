@@ -572,27 +572,53 @@ def analyze_ganesha_cores(node, ganesha_exe="nfs-ganesha/build/ganesha.nfsd", fi
     # - runs gdb --batch -ex bt <ganesha_exe> <core_path>
     # - prints markers so outputs are separable
     grepcmd = "| grep ganesha.nfsd " if filter_only_ganesha else ""
-    cmd = f"""bash -lc 'ids=$(coredumpctl list --no-legend {grepcmd}| awk "{{print $2}}" | sort -u);
+#     cmd = f"""bash -lc 'ids=$(coredumpctl list --no-legend {grepcmd}| awk "{{print $2}}" | sort -u);
+# if [ -z "$ids" ]; then
+#   echo "NO_COREDUMPS_FOUND";
+#   exit 0;
+# fi;
+# for id in $ids; do
+#   echo "===== COREDUMP ID: $id =====";
+#   core=$(coredumpctl info "$id" 2>/dev/null | awk -F"Storage:" '/Storage:/ {gsub(/\(present\)/,""); print $2}' | xargs)
+#   if [ -z "$core" ]; then
+#     echo "NO_CORE_PATH for id:$id";
+#     continue;
+#   fi;
+#   echo "CORE_PATH=$core";
+#   echo "----- GDB BACKTRACE START for $core -----";
+#   # run gdb; if it fails, print message but continue to next core
+#   gdb --batch -ex bt {ganesha_exe} "$core" 2>&1 || echo "GDB_FAILED for $core";
+#   echo "----- GDB BACKTRACE END for $core -----";
+# done'"""
+
+    cmd = f"""bash -lc '
+ids=$(coredumpctl list --no-legend {grepcmd} | awk "{{print \\$2}}" | sort -u);
+
 if [ -z "$ids" ]; then
   echo "NO_COREDUMPS_FOUND";
   exit 0;
 fi;
+
 for id in $ids; do
   echo "===== COREDUMP ID: $id =====";
-  core=$(coredumpctl info "$id" 2>/dev/null | awk -F"Storage:" \\'/Storage:/ {{print $2}}\\' | sed "s/(present)//g" | sed -e "s/^ *//" -e "s/ *$//");
+
+  core=$(coredumpctl info "$id" 2>/dev/null | awk -F"Storage:" "/Storage:/ {{gsub(/\\(present\\)/,\\"\\"); print \\$2}}" | xargs);
+
   if [ -z "$core" ]; then
     echo "NO_CORE_PATH for id:$id";
     continue;
   fi;
+
   echo "CORE_PATH=$core";
   echo "----- GDB BACKTRACE START for $core -----";
-  # run gdb; if it fails, print message but continue to next core
-  gdb --batch -ex bt {ganesha_exe} "$core" 2>&1 || echo "GDB_FAILED for $core";
+
+  gdb --batch -ex bt "{ganesha_exe}" "$core" 2>&1 || echo "GDB_FAILED for $core";
+
   echo "----- GDB BACKTRACE END for $core -----";
-done'"""
+done
+'"""
     # Execute remotely with the provided node interface
     # return whatever node.exec_command returns so the caller can handle stdout/stderr
     out = node.exec_command(sudo=True, cmd=cmd)
     log.info("COREDUMP")
     log.info(out)
-
