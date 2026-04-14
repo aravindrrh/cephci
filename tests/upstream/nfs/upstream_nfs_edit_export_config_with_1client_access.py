@@ -80,7 +80,7 @@ def run(ceph_cluster, **kw):
     nfs_export_client = "/export_client_access"
     nfs_client_mount = "/mnt/nfs_client_mount"
     original_clients_value = "client_address"
-    new_clients_values = f"{clients[0].hostname}"
+    new_clients_values = f"{clients[0].ip_address}"
 
     window_nfs_mount = "Z:"
     # nfs_server_name = [nfs_node.hostname for nfs_node in servers]
@@ -101,7 +101,7 @@ def run(ceph_cluster, **kw):
         for windows_client_obj in setup_windows_clients(config.get("windows_clients")):
             windows_clients.append(windows_client_obj)
         if windows_clients:
-            new_clients_values = f"{windows_clients[0].ip_address}"
+            new_clients_values = f"{windows_clients[0].upstream_nfs_edit_export_config_with_1client_access.py}"
 
     try:
         # Setup nfs cluster

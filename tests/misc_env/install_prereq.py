@@ -56,6 +56,7 @@ rpm_packages = {
         "net-snmp",
         "kernel-modules-extra",
         "iproute-tc",
+        "firewalld",
     ],
 }
 deb_packages = ["wget", "git-core", "python-virtualenv", "lsb-release", "ntp"]

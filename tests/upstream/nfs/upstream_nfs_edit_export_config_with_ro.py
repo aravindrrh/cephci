@@ -35,6 +35,9 @@ def update_export_conf(installer, nfs_export_readonly, new_access_type
         cmd = f"nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf -L /var/log/ganesha.log"
         installer.exec_command(sudo=True, cmd=cmd)
 
+        cmd = f"cat /var/log/ganesha.log"
+        installer.exec_command(sudo=True, cmd=cmd)
+
         # Check if ganesha service is up
         cmd = "pgrep ganesha"
         out = installer.exec_command(sudo=True, cmd=cmd)

@@ -133,13 +133,15 @@ EXPORT {
     if not pid:
         raise OperationFailedError("Failed to restart nfs service")
 
-
     # Get the mount versions specific to clients
     mount_versions = _get_client_specific_mount_versions(version, clients)
+
+    #  Perform nfs mount
+    # Check if the mount version v3 is included in the list of versions and
     # if the mount version is v3, make necessary changes
-    # if 3 in mount_versions.keys():
-    #     ports_to_open = ["portmapper", "mountd"]
-    #     open_mandatory_v3_ports(installer_node, ports_to_open)
+    #if 3 in mount_versions.keys():
+    #    ports_to_open = ["portmapper", "mountd"]
+    #    open_mandatory_v3_ports(installer_node, ports_to_open)
 
     # If there are multiple nfs servers provided, only one is required for mounting
     if isinstance(nfs_server, list):
@@ -156,7 +158,7 @@ EXPORT {
                 version=version,
                 port=port,
                 server=installer_node.ip_address,
-                export=f"export_{i}",
+                export=f"/export_{i}",
             ):
                 raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
             i += 1
@@ -395,44 +397,43 @@ def permission(client, nfs_name, nfs_export, old_permission, new_permission):
     sleep(10)
 
 
-def enable_v3_locking(installer, nfs_name, nfs_node, nfs_server_name):
-    # Enable the NLM support for v3 Locking
-    content = f"""service_type: nfs
-service_id: {nfs_name}
-placement:
-    hosts:
-        - {nfs_server_name}
-spec:
-    enable_nlm: true"""
+def enable_v3_locking(nfs_node):
+    # stop ganesha service
+    pid = ""
+    try:
+        cmd = "pgrep ganesha"
+        out = nfs_node.exec_command(sudo=True, cmd=cmd)
+        pid = out[0].strip()
+        print("PID : ", pid)
+    except Exception:
+        print("Ganesha process not running")
 
-    with open("ganesha.yaml", "w") as f:
-        yaml.dump(content, f)
-    log.info(content)
+    if pid:
+        cmd = f"kill -9 {pid}"
+        nfs_node.exec_command(sudo=True, cmd=cmd)
 
-    # Adding the configurations into the ganesha.yaml file.
-    cmd = f"echo '{content}' >> ganesha.yaml"
-    CephAdm(installer).shell(cmd=cmd)
+    # enable NLOCKMGR ie., Enable_NLM = true; in ganesha.conf
+    cmd = "sed -i 's/^\(\s*Enable_NLM\s*=\s*\)false;/    Enable_NLM = true;/I' /etc/ganesha/ganesha.conf"
+    nfs_node.exec_command(sudo=True, cmd=cmd)
 
-    # Mount the export file inside shell and apply changes
-    cmd = (
-        "--mount ganesha.yaml:/var/lib/ceph/ganesha.yaml -- "
-        "ceph orch apply -i /var/lib/ceph/ganesha.yaml"
-    )
-    CephAdm(installer).shell(cmd=cmd)
+    #start rpc-statd service
+    cmd = "systemctl start rpc-statd"
+    nfs_node.exec_command(sudo=True, cmd=cmd)
 
-    # Restart the NFS Ganesha service
-    CephAdm(installer).ceph.orch.redeploy(service=f"nfs.{nfs_name}")
+    # Restart Ganesha
+    cmd = f"nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf -L /var/log/ganesha.log"
+    nfs_node.exec_command(sudo=True, cmd=cmd)
 
-    # Wait till the NFS daemons are up
-    sleep(10)
+    # Check if ganesha service is up
+    cmd = "pgrep ganesha"
+    out = nfs_node.exec_command(sudo=True, cmd=cmd)
+    pid = out[0].strip()
 
-    # Start the rpc-statd service on server
-    cmd = "sudo systemctl start rpc-statd"
-    nfs_node.exec_command(cmd=cmd)
-
+    if not pid:
+        raise OperationFailedError("Failed to restart nfs service")
     # Open the NLM port
-    ports_to_open = ["nlockmgr"]
-    open_mandatory_v3_ports(nfs_node, ports_to_open)
+    #ports_to_open = ["nlockmgr", "mountd"]
+    #open_mandatory_v3_ports(nfs_node, ports_to_open)
 
 
 def getfattr(client, file_path, attribute_name=None):

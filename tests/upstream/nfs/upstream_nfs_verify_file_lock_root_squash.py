@@ -112,10 +112,15 @@ def run(ceph_cluster, **kw):
                 port=port,
                 server=installer.ip_address,
                 export=nfs_export_squash,
+                other_opts="local_lock=posix",
             ):
                 raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
             client.exec_command(sudo=True, cmd=f"chmod 777 {nfs_squash_mount}/")
         log.info("Mount succeeded on client")
+
+        # Check the mount protocol
+        if version == 3:
+            enable_v3_locking(installer)
 
         # Enable rootsquash using conf file
         rootsquash_using_conf(
@@ -135,7 +140,7 @@ def run(ceph_cluster, **kw):
     try:
         # Check the mount protocol and enable locking for v3
         if version == 3:
-            enable_v3_locking(installer, nfs_name, nfs_node, nfs_server_name)
+            enable_v3_locking(installer)
 
         # Create file on squashed dir
         clients[0].exec_command(

@@ -1,7 +1,13 @@
 from threading import Thread
 from time import sleep
 
-from upstream_nfs_operations import cleanup_cluster, enable_v3_locking, setup_nfs_cluster, create_export, analyze_ganesha_cores
+from upstream_nfs_operations import (
+    cleanup_cluster,
+    enable_v3_locking,
+    setup_nfs_cluster,
+    create_export,
+    analyze_ganesha_cores,
+)
 
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
@@ -87,13 +93,14 @@ def run(ceph_cluster, **kw):
             port=port,
             server=installer.ip_address,
             export=nfs_lock_export,
+            other_opts="local_lock=posix",
         ):
             raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
     log.info("Mount succeeded on client")
 
     # Check the mount protocol
     if version == 3:
-        enable_v3_locking(installer, nfs_name, nfs_node, nfs_server_name)
+        enable_v3_locking(installer)
 
     # Create a file on Client 1
     file_path = f"{nfs_lock_mount}/sample_file"
