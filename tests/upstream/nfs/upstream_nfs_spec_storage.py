@@ -46,7 +46,15 @@ def run(ceph_cluster, **kw):
         )
         cmd = "yum install -y sshpass"
         clients[0].exec_command(cmd=cmd, sudo=True, verbose=True)
-        
+
+        nodes = ceph_cluster.get_nodes()
+        for node in nodes:
+            log.info(f"Generating SSH key on {node.hostname}")
+            node.exec_command(
+                cmd="[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa",
+                sudo=True,
+            )
+
         cmd = f"sshpass -p passwd ssh-copy-id -o StrictHostKeyChecking=no -f -i ~/.ssh/id_rsa.pub root@{clients[0].hostname}"
         clients[0].exec_command(cmd=cmd, sudo=True, verbose=True)
         cmd = f"sshpass -p passwd ssh-copy-id -o StrictHostKeyChecking=no -f -i ~/.ssh/id_rsa.pub root@{clients[0].ip_address}"
