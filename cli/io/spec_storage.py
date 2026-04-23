@@ -115,7 +115,7 @@ class SpecStorage(Cli):
             for parameter, value in benchmark_defination.items():
                 cmd = (
                     f"sed -i '/Benchmark_name:/,/{parameter}:/ s/{parameter}:.*/{parameter}: {value}/'"
-                    f" {self.install_dest}/{self.benchmark_file}"
+                    f" {self.install_dest}/SPECstorage2020/{self.benchmark_file}"
                 )
                 self.execute(sudo=True, cmd=cmd)
         except Exception:
