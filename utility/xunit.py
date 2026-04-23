@@ -74,9 +74,25 @@ def create_xunit_results(suite_name, test_cases, test_run_metadata):
     distribution = test_run_metadata["distro"]
     build = test_run_metadata["build"]
     test_run_id = f"RHCS-{build}-{_file}-{run_id}".replace(".", "-")
+
+    def _meaningful(val):
+        v = (val or "").strip()
+        return v if v and v != "--NA--" else ""
+
+    ceph_grp = _meaningful(ceph_version) or _meaningful(
+        test_run_metadata.get("ceph-version-installer")
+    )
+    ansible_grp = _meaningful(ansible_version)
+    distro_grp = _meaningful(distribution) or _meaningful(
+        test_run_metadata.get("os-version-installer")
+    )
+    ganesha_grp = _meaningful(test_run_metadata.get("nfs-ganesha-packages-installer"))
+
     test_group_id = (
-        f"ceph-build: {ceph_version} "
-        f"ansible-build: {ansible_version} OS distro: {distribution}"
+        f"ceph-build: {ceph_grp or 'unknown'} "
+        f"ansible-build: {ansible_grp or 'unknown'} "
+        f"nfs-ganesha: {ganesha_grp or 'unknown'} "
+        f"OS distro: {distro_grp or 'unknown'}"
     )
     log.info(f"Creating xUnit {_file} for test run-id {test_run_id}")
 
