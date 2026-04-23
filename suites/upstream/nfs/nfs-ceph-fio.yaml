@@ -90,9 +90,11 @@ tests:
       name: configure client
 
   - test:
-      name: Nfs run LTP tests
-      module: upstream_nfs_ltp.py
-      desc: Verify LTP tests on nfs ganesha
+      name: NFS FIO workloads (v3 and v4) on CephFS
+      module: upstream_nfs_fio.py
+      desc: >
+        After upstream NFS setup, run fio (seq write/read, randrw) on NFSv3 and
+        NFSv4.x mounts of the first export (/export_0).
       abort-on-fail: false
       config:
         nfs_version: 4.2
