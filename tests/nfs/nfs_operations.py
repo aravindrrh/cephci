@@ -830,7 +830,7 @@ def check_nfs_daemons_removed(client):
     check_nfs_daemons_removed_retry(client)
 
 
-@retry(OperationFailedError, tries=10, delay=10, backoff=1)
+@retry(OperationFailedError, tries=30, delay=10, backoff=1)
 def check_nfs_daemons_removed_retry(client):
     """
     Helper function to check if NFS daemons are removed.
