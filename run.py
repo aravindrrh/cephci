@@ -986,7 +986,26 @@ def run(args):
         "invoked-by": trigger_user,
     }
 
+    is_spectrum_scale_suite = any(
+        "spectrum_scale" in os.path.normpath(sf) for sf in suite_files
+    )
+
     if xunit_results:
+        if ceph_cluster_dict:
+            installer_xunit_meta = gather_installer_metadata_for_xunit(
+                ceph_cluster_dict
+            )
+            test_run_metadata.update(installer_xunit_meta)
+        if is_spectrum_scale_suite:
+            if not (test_run_metadata.get("ceph-version") or "").strip():
+                test_run_metadata["ceph-version"] = "N/A (IBM Storage Scale suite)"
+            if not (test_run_metadata.get("ceph-ansible-version") or "").strip():
+                test_run_metadata["ceph-ansible-version"] = "N/A"
+        else:
+            if not (test_run_metadata.get("ceph-version") or "").strip():
+                iv = test_run_metadata.get("ceph-version-installer")
+                if iv:
+                    test_run_metadata["ceph-version"] = iv
         create_xunit_results(suite_name, tcs, test_run_metadata)
 
     print("\nAll test logs located here: {base}".format(base=url_base))
@@ -1031,6 +1050,179 @@ def run(args):
         log.info(f"Generated sosreports location : {url_base}/sosreports\n")
 
     return jenkins_rc
+
+
+def _ganesha_version_from_installer(inst):
+    """
+    RPM-based installs vs upstream source (make install).
+    Returns a non-empty string for xUnit visibility.
+    """
+    if inst.pkg_type == "rpm":
+        out, _ = inst.exec_command(
+            sudo=True,
+            cmd=(
+                "rpm -qa 2>/dev/null | grep -iE 'nfs-ganesha|ganesha-ceph' || true"
+            ),
+            check_ec=False,
+        )
+    else:
+        out, _ = inst.exec_command(
+            sudo=True,
+            cmd="dpkg -l 2>/dev/null | grep -iE 'ganesha|nfs-ganesha' || true",
+            check_ec=False,
+        )
+
+    rpm_lines = (out or "").strip()
+    if rpm_lines:
+        return "rpm: " + "; ".join(rpm_lines.splitlines())
+
+    candidate_bins = [
+        "/usr/local/bin/ganesha.nfsd",
+        "/usr/bin/ganesha.nfsd",
+        "/root/nfs-ganesha/build/ganesha.nfsd",
+        "/root/ffilz/nfs-ganesha/build/ganesha.nfsd",
+        "/home/cephuser/nfs-ganesha/build/ganesha.nfsd",
+    ]
+    for gpath in candidate_bins:
+        out, _ = inst.exec_command(
+            sudo=True,
+            cmd=(
+                f"if [ -x '{gpath}' ]; then "
+                f"printf 'source-binary:{gpath}:'; "
+                f"( timeout 3 '{gpath}' -v 2>&1 || timeout 3 '{gpath}' --version 2>&1 "
+                f"|| timeout 3 '{gpath}' -V 2>&1 ) | head -n 5; "
+                f"fi"
+            ),
+            check_ec=False,
+        )
+        ver = (out or "").strip()
+        if ver and "source-binary:" in ver:
+            return ver
+
+    for repo in (
+        "/root/nfs-ganesha",
+        "/root/ffilz/nfs-ganesha",
+        "/home/cephuser/nfs-ganesha",
+    ):
+        out, _ = inst.exec_command(
+            sudo=True,
+            cmd=(
+                f"if [ -d '{repo}/.git' ]; then "
+                f"printf 'source-git:{repo}:'; "
+                f"git -C '{repo}' describe --always --dirty 2>/dev/null; "
+                f"fi"
+            ),
+            check_ec=False,
+        )
+        git_desc = (out or "").strip()
+        if git_desc and git_desc.startswith("source-git:"):
+            return git_desc
+
+    return (
+        "not detected (no nfs-ganesha RPM; no ganesha.nfsd binary or git checkout "
+        "found under common paths)"
+    )
+
+
+def _spectrum_scale_version_from_installer(inst):
+    """Best-effort IBM Spectrum Scale / GPFS version string from the stack node."""
+    if inst.pkg_type == "rpm":
+        out, _ = inst.exec_command(
+            sudo=True,
+            cmd=(
+                "rpm -qa 2>/dev/null | grep -iE '^gpfs|gpfs\\.|ibm-spectrum-scale' "
+                "| sort -u | head -n 30 || true"
+            ),
+            check_ec=False,
+        )
+        rpm_block = (out or "").strip()
+        if rpm_block:
+            return "rpm: " + "; ".join(rpm_block.splitlines())
+
+    out, _ = inst.exec_command(
+        sudo=True,
+        cmd="mmlscluster 2>/dev/null | head -n 25 || true",
+        check_ec=False,
+    )
+    mmls = (out or "").strip()
+    if mmls:
+        return "mmlscluster: " + mmls.replace("\n", " | ")
+
+    out, _ = inst.exec_command(
+        sudo=True,
+        cmd="mmfsadm dump version 2>/dev/null | head -n 15 || true",
+        check_ec=False,
+    )
+    mmfs = (out or "").strip()
+    if mmfs:
+        return "mmfsadm: " + mmfs.replace("\n", " | ")
+
+    return (
+        "not detected (no gpfs RPM match; mmlscluster/mmfsadm not available or empty)"
+    )
+
+
+def gather_installer_metadata_for_xunit(ceph_cluster_dict):
+    """
+    Collect Ceph, nfs-ganesha, IBM Storage Scale / GPFS, and OS release from each
+    cluster's installer node for xUnit suite properties.
+    """
+    if not ceph_cluster_dict:
+        return {}
+
+    ceph_parts = []
+    ganesha_parts = []
+    os_parts = []
+    scale_parts = []
+
+    for cluster_name, ceph_cluster in ceph_cluster_dict.items():
+        installers = ceph_cluster.get_ceph_objects("installer")
+        if not installers:
+            log.warning(
+                "No installer node for cluster %s; skipping installer xUnit metadata",
+                cluster_name,
+            )
+            continue
+
+        inst = installers[0]
+
+        out, _ = inst.exec_command(
+            sudo=True,
+            cmd="ceph --version 2>/dev/null | awk '{print $3}'",
+            check_ec=False,
+        )
+        ceph_ver = (out or "").strip()
+        if ceph_ver:
+            ceph_parts.append(f"{cluster_name}: {ceph_ver}")
+
+        ganesha_parts.append(f"{cluster_name}: {_ganesha_version_from_installer(inst)}")
+        scale_parts.append(
+            f"{cluster_name}: {_spectrum_scale_version_from_installer(inst)}"
+        )
+
+        out, _ = inst.exec_command(
+            sudo=True,
+            cmd=(
+                "grep -E '^PRETTY_NAME=' /etc/os-release 2>/dev/null "
+                "| cut -d= -f2- | tr -d '\"' || true"
+            ),
+            check_ec=False,
+        )
+        pretty = (out or "").strip()
+        if pretty:
+            os_parts.append(f"{cluster_name}: {pretty}")
+
+    meta = {}
+    if ceph_parts:
+        meta["ceph-version-installer"] = " | ".join(ceph_parts)
+    if ganesha_parts:
+        meta["nfs-ganesha-packages-installer"] = " | ".join(ganesha_parts)
+    if scale_parts:
+        meta["ibm-storage-scale-version-installer"] = " | ".join(scale_parts)
+    if os_parts:
+        meta["os-version-installer"] = " | ".join(os_parts)
+
+    return meta
 
 
 def store_cluster_state(ceph_cluster_object, ceph_clusters_file_name):
