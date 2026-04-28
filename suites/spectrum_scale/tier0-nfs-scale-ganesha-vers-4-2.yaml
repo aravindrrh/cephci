@@ -1,0 +1,155 @@
+#===============================================================================================
+# Tier0 NFS-Ganesha on Spectrum Scale (GPFS), NFS 4.2 + xattr + multi-version smoke
+#----------------------------------------------------------------------------------------------
+# Conf: conf/squid/nfs/1admin-7node-3client.yaml
+# Requires stack from first test; other tests skip basic-storage-scale.sh.
+#===============================================================================================
+tests:
+  - test:
+      name: Setup NFS Ganesha Spectrum Scale stack
+      module: nfs_run_spectrum_scale_upstream.py
+      desc: Bootstrap GPFS-backed Ganesha via ci-tests
+      abort-on-fail: true
+
+  - test:
+      name: Nfs Ganesha File Lock
+      module: nfs_verify_file_lock.py
+      desc: Perform locking on same file from 2 different clients
+      polarion-id: CEPH-83577561
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 2
+
+  - test:
+      name: Nfs Verify Readdir Ops
+      module: nfs_verify_readdir_ops.py
+      desc: Perform readdir operation from clients
+      polarion-id: CEPH-83577590
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 4
+
+  - test:
+      name: Verify create file, create softlink and lookups from nfs clients
+      module: nfs_verify_file_ops_soft_links.py
+      desc: Verify create file, create softlink and lookups from nfs clients
+      polarion-id: CEPH-83577596
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 3
+        file_count: 100
+
+  - test:
+      name: Nfs Verify File Operations (ownership)
+      module: nfs_verify_file_operations.py
+      desc: Change the ownership (user and group) of files within the NFS export
+      polarion-id: CEPH-83577601
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 3
+        file_count: 100
+        operations:
+          client01: create_files
+          client02: change_ownership
+          client03: perform_lookups
+
+  - test:
+      name: Nfs Verify File Operations (permissions)
+      module: nfs_verify_file_operations.py
+      desc: Set different file permissions for files within the NFS export
+      polarion-id: CEPH-83577602
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 3
+        file_count: 100
+        operations:
+          client01: create_files
+          client02: change_permission
+          client03: perform_lookups
+
+  - test:
+      name: NFS-Ganesha test setfattr and getfattr operations
+      desc: Verify setting and fetching extended attributes from NFS
+      module: test_nfs_get_set_attr_operation.py
+      polarion-id: CEPH-83591737
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs verify setting and deleting multiple xattr on file
+      module: nfs_multiple_xattr_set_and_delete.py
+      desc: Test setting up and deleting multiple xattr on single file
+      polarion-id: CEPH-83591993
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs verify multiple extended attribute with parallel clients access
+      module: nfs_set_retrieve_xattr_multi_client.py
+      desc: Test multiple extended attribute with multiple clients
+      polarion-id: CEPH-83592377
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 2
+
+  - test:
+      name: Nfs verify extended attributes preserved across filesystem operations
+      module: nfs_test_xattr_across_file_operations.py
+      desc: Extended attributes preserved across copy and move
+      polarion-id: CEPH-83592378
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs verify extended attributes on readonly file
+      module: nfs_verify_xattr_readonly_file.py
+      desc: Extended attributes on a readonly file (chmod-based RO)
+      polarion-id: CEPH-83592397
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs Ganesha test multi mount versions - 4.1 and 4.2 simultaneous mount
+      module: nfs_multi_mount_version_4x.py
+      desc: Mount 4.1 and 4.2 on clients and run IO
+      polarion-id: CEPH-83597604
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        clients: 2
+        nfs_version: [4.1: 1, 4.2: 1]

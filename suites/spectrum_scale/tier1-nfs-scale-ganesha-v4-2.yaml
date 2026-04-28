@@ -1,0 +1,126 @@
+#===============================================================================================
+# Tier1 NFS-Ganesha on Spectrum Scale (GPFS), NFS 4.2 — link / path / permission scenarios
+#----------------------------------------------------------------------------------------------
+# Omits Ceph-only tests (earmark, server reboot, etc.). See suites/squid/nfs/tier1-nfs-ganesha-v4-2.yaml
+#===============================================================================================
+tests:
+  - test:
+      name: Setup NFS Ganesha Spectrum Scale stack
+      module: nfs_run_spectrum_scale_upstream.py
+      desc: Bootstrap GPFS-backed Ganesha via ci-tests
+      abort-on-fail: true
+
+  - test:
+      name: Nfs Verify symbolic links inherit appropriate permissions
+      module: nfs_verify_symbolic_links_permissions.py
+      polarion-id: CEPH-83575975
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Verify owner of symlink and target file can be different users
+      module: nfs_verify_symbolic_links_users.py
+      polarion-id: CEPH-83575972
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs Verify file mv operation on permission errors
+      module: nfs_verify_read_write_operations.py
+      polarion-id: CEPH-83575932
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+        operation: mv_file
+
+  - test:
+      name: Nfs Verify file mv and replace operation
+      module: nfs_verify_read_write_operations.py
+      polarion-id: CEPH-83575934
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+        operation: mv_file_overwrite
+
+  - test:
+      name: Nfs Verify symbolic links to file on other file system
+      module: nfs_verify_symbolic_links_file_other_file_system.py
+      polarion-id: CEPH-83575969
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs Verify hard links reference same inode
+      module: nfs_verify_hard_links_inode.py
+      polarion-id: CEPH-83575960
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Nfs Verify multi depth dir creations
+      module: nfs_verify_multi_depth_dir_and_permissions.py
+      polarion-id: CEPH-83575983
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+        dir_depth: 10
+        dirs_per_depth: 5
+
+  - test:
+      name: Nfs Verify default permissions
+      module: nfs_verify_multi_depth_dir_and_permissions.py
+      polarion-id: CEPH-83576012
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+        operation: default_permissions
+
+  - test:
+      name: Verify rename with hard or symbolic links
+      module: nfs_hard_symbolic_links_rename.py
+      polarion-id: CEPH-83575974
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1
+
+  - test:
+      name: Verify hard links after deleting one link
+      module: nfs_hard_links_delete_file.py
+      polarion-id: CEPH-83575964
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 4.2
+        clients: 1

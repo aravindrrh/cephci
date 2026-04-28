@@ -1,0 +1,120 @@
+#===============================================================================================
+# Tier0 NFS-Ganesha functional tests on IBM Spectrum Scale (GPFS FSAL), NFSv3
+#----------------------------------------------------------------------------------------------
+# Conf: conf/squid/nfs/1admin-7node-3client.yaml (or env with client + installer/CES nodes)
+#
+# Ceph-only cases (mgr export API / RO export variants) are omitted; see squid tier0 YAML.
+# Stack: first test runs basic-storage-scale.sh; remaining tests skip re-provision.
+#
+# Config keys (per test, after setup):
+#   nfs_backend: spectrum_scale
+#   skip_spectrum_scale_stack_setup: true
+#   spectrum_scale_export: /ibm/scale_volume   # optional override
+#===============================================================================================
+tests:
+  - test:
+      name: Setup NFS Ganesha Spectrum Scale stack
+      module: nfs_run_spectrum_scale_upstream.py
+      desc: Bootstrap GPFS-backed Ganesha via ci-tests (basic-storage-scale.sh)
+      abort-on-fail: true
+
+  - test:
+      name: Nfs Ganesha File Lock
+      module: nfs_verify_file_lock.py
+      desc: Perform locking on same file from 2 different clients (GPFS export)
+      polarion-id: CEPH-83577561
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 3
+        clients: 2
+
+  - test:
+      name: Nfs Verify Readdir Ops
+      module: nfs_verify_readdir_ops.py
+      desc: Perform readdir operation from clients
+      polarion-id: CEPH-83577590
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 3
+        clients: 4
+
+  - test:
+      name: Nfs Ganesha rename operations
+      module: test_file_ops_renames.py
+      desc: Perform file and dir renaming and lookups in parallel
+      polarion-id: CEPH-83577594
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 3
+        clients: 3
+        num_files: 1000
+        num_dirs: 1000
+
+  - test:
+      name: Verify create file, create softlink and lookups from nfs clients
+      module: nfs_verify_file_ops_soft_links.py
+      desc: Verify create file, create softlink and lookups from nfs clients
+      polarion-id: CEPH-83577596
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 3
+        clients: 3
+        file_count: 100
+
+  - test:
+      name: Nfs Verify File Operations (ownership)
+      module: nfs_verify_file_operations.py
+      desc: Change the ownership (user and group) of files within the NFS export
+      polarion-id: CEPH-83577601
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 3
+        clients: 3
+        file_count: 100
+        operations:
+          client01: create_files
+          client02: change_ownership
+          client03: perform_lookups
+
+  - test:
+      name: Nfs Verify File Operations (permissions)
+      module: nfs_verify_file_operations.py
+      desc: Set different file permissions for files within the NFS export
+      polarion-id: CEPH-83577602
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 3
+        clients: 3
+        file_count: 100
+        operations:
+          client01: create_files
+          client02: change_permission
+          client03: perform_lookups
+
+  - test:
+      name: Nfs Verify setuid bit set on a file
+      module: nfs_verify_setuid_bit.py
+      desc: Verify setuid bit on NFS (rootsquash export not used on spectrum_scale)
+      abort-on-fail: false
+      config:
+        nfs_backend: spectrum_scale
+        skip_spectrum_scale_stack_setup: true
+        nfs_version: 3
+        clients: 3
+        file_count: 100
+        operations:
+          client01: create_files
+          client02: setuid_bit
+          client03: perform_lookups

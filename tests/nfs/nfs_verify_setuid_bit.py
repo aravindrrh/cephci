@@ -1,11 +1,16 @@
 from threading import Thread
 from time import sleep
 
-from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from nfs_operations import cleanup_cluster
 
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
 from cli.utilities.filesys import Mount, Unmount
+from spectrum_scale_nfs_helpers import (
+    is_spectrum_scale_backend,
+    resolve_nfs_service_nodes,
+    setup_nfs_cluster_or_scale,
+)
 from utility.log import Log
 
 log = Log(__name__)
@@ -70,7 +75,7 @@ def run(ceph_cluster, **kw):
         **kw: Key/value pairs of configuration information to be used in the test.
     """
     config = kw.get("config")
-    nfs_nodes = ceph_cluster.get_nodes("nfs")
+    _, nfs_server_name = resolve_nfs_service_nodes(ceph_cluster, config)
     clients = ceph_cluster.get_nodes("client")
 
     port = config.get("port", "2049")
@@ -82,7 +87,6 @@ def run(ceph_cluster, **kw):
     nfs_name = "cephfs-nfs"
     nfs_mount = "/mnt/nfs"
     nfs_export = "/export"
-    nfs_server_name = nfs_nodes[0].hostname
     fs_name = "cephfs"
 
     # Squashed export parameters
@@ -94,10 +98,12 @@ def run(ceph_cluster, **kw):
         raise ConfigError("The test requires more clients than available")
 
     clients = clients[:no_clients]  # Select only the required number of clients
+    use_scale = is_spectrum_scale_backend(config)
 
     try:
         # Setup nfs cluster
-        setup_nfs_cluster(
+        setup_nfs_cluster_or_scale(
+            ceph_cluster,
             clients,
             nfs_server_name,
             port,
@@ -107,30 +113,40 @@ def run(ceph_cluster, **kw):
             fs_name,
             nfs_export,
             fs_name,
-            ceph_cluster=ceph_cluster,
+            config=config,
         )
 
-        # Create export with squash permission
-        Ceph(clients[0]).nfs.export.create(
-            fs_name=fs_name,
-            nfs_name=nfs_name,
-            nfs_export=nfs_export_squash,
-            fs=fs_name,
-            squash="rootsquash",
-        )
-        sleep(9)
+        if use_scale:
+            work_mount = nfs_mount
+            log.info(
+                "spectrum_scale: using primary RW export for setuid workflow "
+                "(no separate rootsquash export)"
+            )
+        else:
+            work_mount = nfs_squash_mount
+            # Create export with squash permission
+            Ceph(clients[0]).nfs.export.create(
+                fs_name=fs_name,
+                nfs_name=nfs_name,
+                nfs_export=nfs_export_squash,
+                fs=fs_name,
+                squash="rootsquash",
+            )
+            sleep(9)
 
-        # Mount the volume with rootsquash enable on clients
-        clients[0].create_dirs(dir_path=nfs_squash_mount, sudo=True)
-        if Mount(clients[0]).nfs(
-            mount=nfs_squash_mount,
-            version=version,
-            port=port,
-            server=nfs_server_name,
-            export=nfs_export_squash,
-        ):
-            raise OperationFailedError(f"Failed to mount nfs on {clients[0].hostname}")
-        log.info("Mount succeeded on client")
+            # Mount the volume with rootsquash enable on clients
+            clients[0].create_dirs(dir_path=nfs_squash_mount, sudo=True)
+            if Mount(clients[0]).nfs(
+                mount=nfs_squash_mount,
+                version=version,
+                port=port,
+                server=nfs_server_name,
+                export=nfs_export_squash,
+            ):
+                raise OperationFailedError(
+                    f"Failed to mount nfs on {clients[0].hostname}"
+                )
+            log.info("Mount succeeded on client")
 
         # Create oprtaions on each client
         for client, operation in operations.items():
@@ -140,7 +156,7 @@ def run(ceph_cluster, **kw):
                         target=create_files,
                         args=(
                             clients[int(client[-2:]) - 1],
-                            nfs_squash_mount,
+                            work_mount,
                             file_count,
                         ),
                     )
@@ -151,7 +167,7 @@ def run(ceph_cluster, **kw):
                         target=setuid_bit,
                         args=(
                             clients[int(client[-2:]) - 1],
-                            nfs_squash_mount,
+                            work_mount,
                             file_count,
                         ),
                     )
@@ -162,7 +178,7 @@ def run(ceph_cluster, **kw):
                         target=perform_lookups,
                         args=(
                             clients[int(client[-2:]) - 1],
-                            nfs_squash_mount,
+                            work_mount,
                             file_count,
                         ),
                     )
@@ -184,15 +200,16 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         sleep(10)
-        # Cleaning up the squash export and mount dir
-        for client in clients[:2]:
-            log.info("Unmounting nfs-ganesha squash mount on client:")
-            if Unmount(client).unmount(nfs_squash_mount):
-                raise OperationFailedError(
-                    f"Failed to unmount nfs on {clients[0].hostname}"
-                )
-            log.info("Removing nfs-ganesha squash mount dir on client:")
-            client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_squash_mount}")
-        Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_squash)
+        if not use_scale:
+            # Cleaning up the squash export and mount dir
+            for client in clients[:2]:
+                log.info("Unmounting nfs-ganesha squash mount on client:")
+                if Unmount(client).unmount(nfs_squash_mount):
+                    raise OperationFailedError(
+                        f"Failed to unmount nfs on {clients[0].hostname}"
+                    )
+                log.info("Removing nfs-ganesha squash mount dir on client:")
+                client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_squash_mount}")
+            Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_squash)
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
     return 0

@@ -1,9 +1,14 @@
 import threading
 from time import sleep
 
-from nfs_operations import cleanup_cluster, getfattr, setfattr, setup_nfs_cluster
+from nfs_operations import cleanup_cluster, getfattr, setfattr
 
 from cli.exceptions import ConfigError
+from spectrum_scale_nfs_helpers import (
+    is_spectrum_scale_backend,
+    resolve_nfs_service_nodes,
+    setup_nfs_cluster_or_scale,
+)
 from utility.log import Log
 
 log = Log(__name__)
@@ -15,7 +20,7 @@ def run(ceph_cluster, **kw):
         **kw: Key/value pairs of configuration information to be used in the test.
     """
     config = kw.get("config")
-    nfs_nodes = ceph_cluster.get_nodes("nfs")
+    nfs_nodes, nfs_server_name = resolve_nfs_service_nodes(ceph_cluster, config)
     clients = ceph_cluster.get_nodes("client")
     port = config.get("port", "2049")
     version = config.get("nfs_version", "4.2")
@@ -31,12 +36,12 @@ def run(ceph_cluster, **kw):
     nfs_export = "/export"
     nfs_mount = "/mnt/nfs"
     fs = "cephfs"
-    nfs_server_name = nfs_node.hostname
     filename = "Testfile"
 
     try:
         # Setup nfs cluster
-        setup_nfs_cluster(
+        setup_nfs_cluster_or_scale(
+            ceph_cluster,
             clients,
             nfs_server_name,
             port,
@@ -46,15 +51,16 @@ def run(ceph_cluster, **kw):
             fs_name,
             nfs_export,
             fs,
-            ceph_cluster=ceph_cluster,
+            config=config,
         )
 
-        # Mount the export on client 2
-        cmd = f"umount -l {nfs_mount}"
-        clients[1].exec_command(sudo=True, cmd=cmd)
+        # Remount client 2 on the same Ceph export pseudo (not used for spectrum_scale)
+        if not is_spectrum_scale_backend(config):
+            cmd = f"umount -l {nfs_mount}"
+            clients[1].exec_command(sudo=True, cmd=cmd)
 
-        cmd = f"mount -t nfs {nfs_nodes[0].ip_address}:{nfs_export}_0 {nfs_mount}"
-        clients[1].exec_command(sudo=True, cmd=cmd)
+            cmd = f"mount -t nfs {nfs_nodes[0].ip_address}:{nfs_export}_0 {nfs_mount}"
+            clients[1].exec_command(sudo=True, cmd=cmd)
 
         # Create a file on Mount point
         for i in range(1, 11):
