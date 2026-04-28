@@ -12,7 +12,7 @@ tests:
 
   - test:
       name: Verify create file, create hardlink and lookups
-      module: nfs_verify_file_ops_hard_links.py
+      module: spectrumscale.scale_nfs_verify_file_ops_hard_links.py
       polarion-id: CEPH-83577597
       abort-on-fail: false
       config:
@@ -24,7 +24,7 @@ tests:
 
   - test:
       name: Modifying file attributes (size, mtime, atime)
-      module: nfs_verify_file_modification.py
+      module: spectrumscale.scale_nfs_verify_file_modification.py
       polarion-id: CEPH-83577602
       abort-on-fail: false
       config:
@@ -36,7 +36,7 @@ tests:
 
   - test:
       name: Nfs Verify multiple parallel io and lookups
-      module: nfs_verify_multiple_parallel_io_and_lookups.py
+      module: spectrumscale.scale_nfs_verify_multiple_parallel_io_and_lookups.py
       polarion-id: CEPH-83581304
       abort-on-fail: false
       config:
@@ -47,7 +47,7 @@ tests:
 
   - test:
       name: Nfs Verify rm write lookups in parallel from multi clients
-      module: nfs_verify_parallel_rm_write_lookup.py
+      module: spectrumscale.scale_nfs_verify_parallel_rm_write_lookup.py
       polarion-id: CEPH-83577591
       abort-on-fail: false
       config:
@@ -58,7 +58,7 @@ tests:
 
   - test:
       name: Nfs Test File Append
-      module: nfs_file_append.py
+      module: spectrumscale.scale_nfs_file_append.py
       polarion-id: CEPH-83577599
       abort-on-fail: false
       config:
@@ -69,7 +69,7 @@ tests:
 
   - test:
       name: Nfs Verify read write operation permissions
-      module: nfs_verify_read_write_operations.py
+      module: spectrumscale.scale_nfs_verify_read_write_operations.py
       polarion-id: CEPH-83575941
       abort-on-fail: false
       config:
@@ -81,7 +81,7 @@ tests:
 
   - test:
       name: Nfs verify read and write non existing file
-      module: nfs_verify_read_write_operations.py
+      module: spectrumscale.scale_nfs_verify_read_write_operations.py
       polarion-id: CEPH-83575927
       abort-on-fail: false
       config:
@@ -93,7 +93,7 @@ tests:
 
   - test:
       name: Nfs Ganesha copy operations
-      module: test_file_ops_copy.py
+      module: spectrumscale.scale_test_file_ops_copy.py
       polarion-id: CEPH-83577595
       abort-on-fail: false
       config:
@@ -106,7 +106,7 @@ tests:
 
   - test:
       name: Nfs Ganesha rename operations
-      module: test_file_ops_renames.py
+      module: spectrumscale.scale_test_file_ops_renames.py
       polarion-id: CEPH-83577594
       abort-on-fail: false
       config:

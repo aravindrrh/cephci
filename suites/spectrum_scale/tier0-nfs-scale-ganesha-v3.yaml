@@ -20,7 +20,7 @@ tests:
 
   - test:
       name: Nfs Ganesha File Lock
-      module: nfs_verify_file_lock.py
+      module: spectrumscale.scale_nfs_verify_file_lock.py
       desc: Perform locking on same file from 2 different clients (GPFS export)
       polarion-id: CEPH-83577561
       abort-on-fail: false
@@ -32,7 +32,7 @@ tests:
 
   - test:
       name: Nfs Verify Readdir Ops
-      module: nfs_verify_readdir_ops.py
+      module: spectrumscale.scale_nfs_verify_readdir_ops.py
       desc: Perform readdir operation from clients
       polarion-id: CEPH-83577590
       abort-on-fail: false
@@ -44,7 +44,7 @@ tests:
 
   - test:
       name: Nfs Ganesha rename operations
-      module: test_file_ops_renames.py
+      module: spectrumscale.scale_test_file_ops_renames.py
       desc: Perform file and dir renaming and lookups in parallel
       polarion-id: CEPH-83577594
       abort-on-fail: false
@@ -58,7 +58,7 @@ tests:
 
   - test:
       name: Verify create file, create softlink and lookups from nfs clients
-      module: nfs_verify_file_ops_soft_links.py
+      module: spectrumscale.scale_nfs_verify_file_ops_soft_links.py
       desc: Verify create file, create softlink and lookups from nfs clients
       polarion-id: CEPH-83577596
       abort-on-fail: false
@@ -71,7 +71,7 @@ tests:
 
   - test:
       name: Nfs Verify File Operations (ownership)
-      module: nfs_verify_file_operations.py
+      module: spectrumscale.scale_nfs_verify_file_operations.py
       desc: Change the ownership (user and group) of files within the NFS export
       polarion-id: CEPH-83577601
       abort-on-fail: false
@@ -88,7 +88,7 @@ tests:
 
   - test:
       name: Nfs Verify File Operations (permissions)
-      module: nfs_verify_file_operations.py
+      module: spectrumscale.scale_nfs_verify_file_operations.py
       desc: Set different file permissions for files within the NFS export
       polarion-id: CEPH-83577602
       abort-on-fail: false
@@ -105,7 +105,7 @@ tests:
 
   - test:
       name: Nfs Verify setuid bit set on a file
-      module: nfs_verify_setuid_bit.py
+      module: spectrumscale.scale_nfs_verify_setuid_bit.py
       desc: Verify setuid bit on NFS (rootsquash export not used on spectrum_scale)
       abort-on-fail: false
       config:

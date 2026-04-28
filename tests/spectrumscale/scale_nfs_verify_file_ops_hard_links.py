@@ -1,7 +1,12 @@
 from threading import Thread
 from time import sleep
 
-from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from nfs_operations import cleanup_cluster
+
+from spectrumscale.spectrum_scale_nfs_helpers import (
+    resolve_nfs_service_nodes,
+    setup_nfs_cluster_or_scale,
+)
 
 from cli.exceptions import ConfigError, OperationFailedError
 from cli.utilities.utils import create_files, perform_lookups
@@ -10,42 +15,29 @@ from utility.log import Log
 log = Log(__name__)
 
 
-def modify_file(client, mount_point, file_count, file_size, modified_time):
+def create_hard_link(client, mount_point, file_count):
     for i in range(1, file_count + 1):
-        # Modify and check file size
-        client.exec_command(
-            sudo=True, cmd=f"truncate -s {file_size} {mount_point}/file{i}"
-        )
-        out = client.exec_command(cmd=f"du -h {mount_point}/file{i}", sudo=True)
-        if file_size not in out[0]:
-            raise OperationFailedError(f"failed to modify file{i} size")
-
-        # Modify and check access and modification time
-        client.exec_command(
-            sudo=True, cmd=f"touch -t {modified_time} {mount_point}/file{i}"
-        )
-        out = client.exec_command(
-            cmd=f'ls -l --time-style="+%Y%m%d%H%M.%S" {mount_point}/file{i}', sudo=True
-        )
-        if modified_time not in out[0]:
-            raise OperationFailedError(f"failed to modify file{i} access time")
+        try:
+            client.exec_command(
+                sudo=True, cmd=f"ln {mount_point}/file{i} {mount_point}/link_file{i}"
+            )
+        except Exception:
+            raise OperationFailedError(f"failed to create softlink file{i}")
 
 
 def run(ceph_cluster, **kw):
-    """Modifying file attributes such as size, modification time, and access time
+    """Verify create file, create soflink and lookups from nfs clients
     Args:
         **kw: Key/value pairs of configuration information to be used in the test.
     """
     config = kw.get("config")
-    nfs_nodes = ceph_cluster.get_nodes("nfs")
+    nfs_nodes, nfs_server_name = resolve_nfs_service_nodes(ceph_cluster, config)
     clients = ceph_cluster.get_nodes("client")
 
     port = config.get("port", "2049")
     version = config.get("nfs_version", "4.0")
     no_clients = int(config.get("clients", "2"))
     file_count = int(config.get("file_count", "10"))
-    file_size = config.get("file_size", "100K")
-    modified_time = config.get("modified_time", "202308100000.00")
 
     # If the setup doesn't have required number of clients, exit.
     if no_clients > len(clients):
@@ -58,11 +50,11 @@ def run(ceph_cluster, **kw):
     nfs_export = "/export"
     nfs_mount = "/mnt/nfs"
     fs = "cephfs"
-    nfs_server_name = nfs_node.hostname
 
     try:
         # Setup nfs cluster
-        setup_nfs_cluster(
+        setup_nfs_cluster_or_scale(
+            ceph_cluster,
             clients,
             nfs_server_name,
             port,
@@ -72,16 +64,13 @@ def run(ceph_cluster, **kw):
             fs_name,
             nfs_export,
             fs,
-            ceph_cluster=ceph_cluster,
+            config=config,
         )
 
         # Create oprtaions on each client
         operations = [
             Thread(target=create_files, args=(clients[0], nfs_mount, file_count)),
-            Thread(
-                target=modify_file,
-                args=(clients[1], nfs_mount, file_count, file_size, modified_time),
-            ),
+            Thread(target=create_hard_link, args=(clients[1], nfs_mount, file_count)),
             Thread(target=perform_lookups, args=(clients[2], nfs_mount, file_count)),
         ]
 

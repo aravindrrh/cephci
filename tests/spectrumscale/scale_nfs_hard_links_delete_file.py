@@ -1,6 +1,11 @@
 from time import sleep
 
-from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from nfs_operations import cleanup_cluster
+
+from spectrumscale.spectrum_scale_nfs_helpers import (
+    resolve_nfs_service_nodes,
+    setup_nfs_cluster_or_scale,
+)
 
 from cli.exceptions import ConfigError, OperationFailedError
 from utility.log import Log
@@ -14,7 +19,7 @@ def run(ceph_cluster, **kw):
         **kw: Key/value pairs of configuration information to be used in the test.
     """
     config = kw.get("config")
-    nfs_nodes = ceph_cluster.get_nodes("nfs")
+    nfs_nodes, nfs_server_name = resolve_nfs_service_nodes(ceph_cluster, config)
     clients = ceph_cluster.get_nodes("client")
 
     port = config.get("port", "2049")
@@ -32,11 +37,11 @@ def run(ceph_cluster, **kw):
     nfs_export = "/export"
     nfs_mount = "/mnt/nfs"
     fs = "cephfs"
-    nfs_server_name = nfs_node.hostname
 
     try:
         # Setup nfs cluster
-        setup_nfs_cluster(
+        setup_nfs_cluster_or_scale(
+            ceph_cluster,
             clients,
             nfs_server_name,
             port,
@@ -46,35 +51,45 @@ def run(ceph_cluster, **kw):
             fs_name,
             nfs_export,
             fs,
-            ceph_cluster=ceph_cluster,
+            config=config,
         )
 
-        # Create file
+        # Create file in local file system
         cmd = f"touch {nfs_mount}/test_file"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # Remove read and write permission for all other users
-        cmd = f"chmod 600 {nfs_mount}/test_file"
+        # Create hard links
+        cmd = f"ln {nfs_mount}/test_file {nfs_mount}/hard_link_file1"
+        clients[0].exec_command(cmd=cmd, sudo=True)
+        cmd = f"ln {nfs_mount}/test_file {nfs_mount}/hard_link_file2"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # Create symbolic link
-        cmd = f"ln -s {nfs_mount}/test_file {nfs_mount}/link_file"
+        # Delete file with multiple hard links
+        cmd = f"rm -rf {nfs_mount}/test_file"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # Try accessing the file using other user "cephuser"
-        try:
-            cmd = f"su cephuser -c 'cat {nfs_mount}/link_file'"
-            clients[0].exec_command(cmd=cmd, sudo=True)
-        except Exception as e:
-            if "Permission denied" in str(e):
-                log.info(
-                    f"Expected! Permission denied error for user without access: {e}"
-                )
-            else:
-                raise OperationFailedError(
-                    f"Failed with an error other than permission denied: {e}"
-                )
-
+        # Verify hardlink remaning hardlinks files
+        hardlink_file1_inode = (
+            clients[0]
+            .exec_command(
+                cmd="ls -i /mnt/nfs/hard_link_file1 | awk '{print $1}'", sudo=True
+            )[0]
+            .strip()
+        )
+        hardlink_file2_inode = (
+            clients[0]
+            .exec_command(
+                cmd="ls -i /mnt/nfs/hard_link_file2 | awk '{print $1}'", sudo=True
+            )[0]
+            .strip()
+        )
+        if hardlink_file1_inode != hardlink_file2_inode:
+            raise OperationFailedError(
+                "hard link file not have same inode as original file"
+            )
+            return 1
+        else:
+            log.info("iNode match for original and hard link file")
     except Exception as e:
         log.error(f"Error : {e}")
     finally:

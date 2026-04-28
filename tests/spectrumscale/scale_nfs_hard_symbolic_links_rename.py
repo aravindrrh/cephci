@@ -1,6 +1,11 @@
 from time import sleep
 
-from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from nfs_operations import cleanup_cluster
+
+from spectrumscale.spectrum_scale_nfs_helpers import (
+    resolve_nfs_service_nodes,
+    setup_nfs_cluster_or_scale,
+)
 
 from cli.exceptions import ConfigError, OperationFailedError
 from utility.log import Log
@@ -14,7 +19,7 @@ def run(ceph_cluster, **kw):
         **kw: Key/value pairs of configuration information to be used in the test.
     """
     config = kw.get("config")
-    nfs_nodes = ceph_cluster.get_nodes("nfs")
+    nfs_nodes, nfs_server_name = resolve_nfs_service_nodes(ceph_cluster, config)
     clients = ceph_cluster.get_nodes("client")
 
     port = config.get("port", "2049")
@@ -32,11 +37,11 @@ def run(ceph_cluster, **kw):
     nfs_export = "/export"
     nfs_mount = "/mnt/nfs"
     fs = "cephfs"
-    nfs_server_name = nfs_node.hostname
 
     try:
         # Setup nfs cluster
-        setup_nfs_cluster(
+        setup_nfs_cluster_or_scale(
+            ceph_cluster,
             clients,
             nfs_server_name,
             port,
@@ -46,30 +51,36 @@ def run(ceph_cluster, **kw):
             fs_name,
             nfs_export,
             fs,
-            ceph_cluster=ceph_cluster,
+            config=config,
         )
 
         # Create file in local file system
         cmd = f"touch {nfs_mount}/test_file"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # Create hard links
-        cmd = f"ln {nfs_mount}/test_file {nfs_mount}/link_file"
+        # Create hard and symbolic links
+        cmd = f"ln {nfs_mount}/test_file {nfs_mount}/hard_link_file"
+        clients[0].exec_command(cmd=cmd, sudo=True)
+        cmd = f"ln -s {nfs_mount}/test_file {nfs_mount}/symbolic_link_file"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # Check inode for original and hard link file
+        # Rename file having hard and symbolic links
+        cmd = f"mv {nfs_mount}/test_file {nfs_mount}/test_file_rename"
+        clients[0].exec_command(cmd=cmd, sudo=True)
+
+        # Verify hard link after rename
         original_file_inode = (
             clients[0]
-            .exec_command(cmd="ls -i /mnt/nfs/test_file | awk '{print $1}'", sudo=True)[
-                0
-            ]
+            .exec_command(
+                cmd="ls -i /mnt/nfs/test_file_rename | awk '{print $1}'", sudo=True
+            )[0]
             .strip()
         )
         hard_link_file_inode = (
             clients[0]
-            .exec_command(cmd="ls -i /mnt/nfs/link_file | awk '{print $1}'", sudo=True)[
-                0
-            ]
+            .exec_command(
+                cmd="ls -i /mnt/nfs/hard_link_file | awk '{print $1}'", sudo=True
+            )[0]
             .strip()
         )
         if original_file_inode != hard_link_file_inode:
@@ -79,6 +90,21 @@ def run(ceph_cluster, **kw):
             return 1
         else:
             log.info("iNode match for original and hard link file")
+
+        # Verify symbolic link after rename
+        out = (
+            clients[0]
+            .exec_command(
+                cmd="ls -l /mnt/nfs/symbolic_link_file | awk '{print $10}'", sudo=True
+            )[0]
+            .strip()
+        )
+        if "->" not in out:
+            raise OperationFailedError("Failed to created symbolic links to files")
+            return 1
+        else:
+            log.info("Successfully created symbolic links to file")
+
     except Exception as e:
         log.error(f"Error : {e}")
     finally:

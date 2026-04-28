@@ -1,6 +1,11 @@
 from time import sleep
 
-from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from nfs_operations import cleanup_cluster
+
+from spectrumscale.spectrum_scale_nfs_helpers import (
+    resolve_nfs_service_nodes,
+    setup_nfs_cluster_or_scale,
+)
 
 from cli.exceptions import ConfigError, OperationFailedError
 from utility.log import Log
@@ -14,7 +19,7 @@ def run(ceph_cluster, **kw):
         **kw: Key/value pairs of configuration information to be used in the test.
     """
     config = kw.get("config")
-    nfs_nodes = ceph_cluster.get_nodes("nfs")
+    nfs_nodes, nfs_server_name = resolve_nfs_service_nodes(ceph_cluster, config)
     clients = ceph_cluster.get_nodes("client")
 
     port = config.get("port", "2049")
@@ -32,11 +37,11 @@ def run(ceph_cluster, **kw):
     nfs_export = "/export"
     nfs_mount = "/mnt/nfs"
     fs = "cephfs"
-    nfs_server_name = nfs_node.hostname
 
     try:
         # Setup nfs cluster
-        setup_nfs_cluster(
+        setup_nfs_cluster_or_scale(
+            ceph_cluster,
             clients,
             nfs_server_name,
             port,
@@ -46,34 +51,33 @@ def run(ceph_cluster, **kw):
             fs_name,
             nfs_export,
             fs,
-            ceph_cluster=ceph_cluster,
+            config=config,
         )
 
         # Create file
-        cmd = f"touch {nfs_mount}/test_file"
+        cmd = f"touch {nfs_mount}/test1_file"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # Remove read and write permission for all other users
-        cmd = f"chmod 600 {nfs_mount}/test_file"
+        # Change owner of file to "cephuser"
+        cmd = f"chown cephuser {nfs_mount}/test1_file"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
         # Create symbolic link
-        cmd = f"ln -s {nfs_mount}/test_file {nfs_mount}/link_file"
+        cmd = f"ln -s {nfs_mount}/test1_file {nfs_mount}/link1_file"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # Try accessing the file using other user "cephuser"
-        try:
-            cmd = f"su cephuser -c 'cat {nfs_mount}/link_file'"
-            clients[0].exec_command(cmd=cmd, sudo=True)
-        except Exception as e:
-            if "Permission denied" in str(e):
-                log.info(
-                    f"Expected! Permission denied error for user without access: {e}"
-                )
-            else:
-                raise OperationFailedError(
-                    f"Failed with an error other than permission denied: {e}"
-                )
+        # verify owner of symbloic link file and target file is different
+        owner_target_file = clients[0].exec_command(
+            cmd="ls -l /mnt/nfs/test1_file | awk '{print $3}'", sudo=True
+        )[0]
+        owner_sym_link_file = clients[0].exec_command(
+            cmd="ls -l /mnt/nfs/link1_file | awk '{print $3}'", sudo=True
+        )[0]
+        if owner_target_file == owner_sym_link_file:
+            raise OperationFailedError("Owner of target and sym link files same")
+            return 1
+        else:
+            log.info("Expected! owner of target and sym link files are different")
 
     except Exception as e:
         log.error(f"Error : {e}")

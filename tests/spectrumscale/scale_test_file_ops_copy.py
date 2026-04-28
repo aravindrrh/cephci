@@ -1,6 +1,11 @@
-import concurrent.futures
+from threading import Thread
 
-from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from nfs_operations import cleanup_cluster
+
+from spectrumscale.spectrum_scale_nfs_helpers import (
+    resolve_nfs_service_nodes,
+    setup_nfs_cluster_or_scale,
+)
 
 from cli.exceptions import ConfigError, OperationFailedError
 from utility.log import Log
@@ -8,7 +13,7 @@ from utility.log import Log
 log = Log(__name__)
 
 
-def create_rename_files(mount_point, num_files, client1, client2):
+def create_copy_files(mount_point, num_files, client1, client2):
     for i in range(1, num_files + 1):
         try:
             client1.exec_command(
@@ -17,13 +22,13 @@ def create_rename_files(mount_point, num_files, client1, client2):
             )
             client2.exec_command(
                 sudo=True,
-                cmd=f"mv {mount_point}/file{i} {mount_point}/renamefile{i}",
+                cmd=f"cp {mount_point}/file{i} {mount_point}/copyfile{i}",
             )
         except Exception:
-            raise OperationFailedError(f"failed to create file file{i}")
+            raise OperationFailedError(f"failed to perform operation on file{i}")
 
 
-def create_rename_dirs(mount_point, num_dirs, client1, client2):
+def create_copy_dirs(mount_point, num_dirs, client1, client2):
     for i in range(1, num_dirs + 1):
         try:
             client1.exec_command(
@@ -32,10 +37,12 @@ def create_rename_dirs(mount_point, num_dirs, client1, client2):
             )
             client2.exec_command(
                 sudo=True,
-                cmd=f"mv {mount_point}/dir{i} {mount_point}/renamedir{i}",
+                cmd=f"cp -r {mount_point}/dir{i} {mount_point}/copydir{i}",
             )
         except Exception:
-            raise OperationFailedError(f"failed to create directory dir{i}")
+            raise OperationFailedError(
+                f"failed to perform operation on directory dir{i}"
+            )
 
 
 def perform_lookups(client, mount_point, num_files, num_dirs):
@@ -55,12 +62,12 @@ def perform_lookups(client, mount_point, num_files, num_dirs):
 
 
 def run(ceph_cluster, **kw):
-    """Test rename of files and directories on NFS mount
+    """Test copy of files and directories on NFS mount
     Args:
         **kw: Key/value pairs of configuration information to be used in the test.
     """
     config = kw.get("config")
-    nfs_nodes = ceph_cluster.get_nodes("nfs")
+    nfs_nodes, nfs_server_name = resolve_nfs_service_nodes(ceph_cluster, config)
     clients = ceph_cluster.get_nodes("client")
 
     port = config.get("port", "2049")
@@ -71,7 +78,6 @@ def run(ceph_cluster, **kw):
     nfs_name = "cephfs-nfs"
     nfs_mount = "/mnt/nfs"
     nfs_export = "/export"
-    nfs_server_name = nfs_nodes[0].hostname
     fs_name = "cephfs"
 
     # If the setup doesn't have required number of clients, exit.
@@ -82,7 +88,8 @@ def run(ceph_cluster, **kw):
 
     try:
         # Setup nfs cluster
-        setup_nfs_cluster(
+        setup_nfs_cluster_or_scale(
+            ceph_cluster,
             clients,
             nfs_server_name,
             port,
@@ -92,49 +99,35 @@ def run(ceph_cluster, **kw):
             fs_name,
             nfs_export,
             fs_name,
-            ceph_cluster=ceph_cluster,
+            config=config,
         )
+        # Create files and dirs from client 1 and copy files and dirs from client 2
+        client1 = clients[0]
+        client2 = clients[1]
+        operations = [
+            Thread(
+                target=create_copy_files,
+                args=(nfs_mount, num_files, client1, client2),
+            ),
+            Thread(
+                target=create_copy_dirs,
+                args=(nfs_mount, num_dirs, client1, client2),
+            ),
+            Thread(
+                target=perform_lookups,
+                args=(clients[2], nfs_mount, num_files, num_dirs),
+            ),
+        ]
 
-        # Create files from Client 1 and perform lookups and rename from client 2 and client 3
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = []
+        # start opertaion on each client
+        for operation in operations:
+            operation.start()
 
-            create_files_future = executor.submit(
-                create_rename_files,
-                nfs_mount,
-                num_files,
-                client1=clients[0],
-                client2=clients[1],
-            )
-            create_dirs_future = executor.submit(
-                create_rename_dirs,
-                nfs_mount,
-                num_dirs,
-                client1=clients[0],
-                client2=clients[1],
-            )
-            perform_lookups_future = executor.submit(
-                perform_lookups, clients[2], nfs_mount, num_files, num_dirs
-            )
+        # Wait for all operation to finish
+        for operation in operations:
+            operation.join()
 
-            futures.extend(
-                [
-                    create_files_future,
-                    create_dirs_future,
-                    perform_lookups_future,
-                ]
-            )
-
-            # Wait for creates and renames to complete
-            concurrent.futures.wait(
-                [
-                    create_files_future,
-                    create_dirs_future,
-                    perform_lookups_future,
-                ]
-            )
-
-        log.info("Successfully completed the rename tests for files and dirs")
+        log.info("Successfully completed the copy tests for files and dirs")
 
     finally:
         log.info("Cleaning up")
