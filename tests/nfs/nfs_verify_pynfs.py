@@ -1,3 +1,5 @@
+import shlex
+
 from nfs_operations import cleanup_cluster, setup_nfs_cluster
 
 from cli.exceptions import ConfigError, OperationFailedError
@@ -7,7 +9,8 @@ log = Log(__name__)
 
 
 def run(ceph_cluster, **kw):
-    """Verify file lock operation
+    """Run pynfs testserver against the NFS export and check results.
+
     Args:
         **kw: Key/value pairs of configuration information to be used in the test.
     """
@@ -31,6 +34,7 @@ def run(ceph_cluster, **kw):
     nfs_mount = "/mnt/nfs"
     fs = "cephfs"
     nfs_server_name = nfs_node.hostname
+    pynfs_workdir = None
 
     try:
         # Setup nfs cluster
@@ -47,19 +51,34 @@ def run(ceph_cluster, **kw):
             ceph_cluster=ceph_cluster,
         )
 
-        # Create a file on Client 1
+        out_mk, _ = clients[0].exec_command(
+            cmd="mktemp -d /tmp/cephci-pynfs.XXXXXX",
+            sudo=True,
+        )
+        pynfs_workdir = out_mk.strip().splitlines()[-1].strip()
+        if not pynfs_workdir.startswith("/tmp/cephci-pynfs."):
+            raise OperationFailedError(
+                f"Refusing to use unexpected mktemp path: {pynfs_workdir!r}"
+            )
+
+        repo = f"{pynfs_workdir}/pynfs"
+        qrepo = shlex.quote(repo)
+        # Isolate clone/build under /tmp (unique per run); testserver targets the NFS export over the network.
         cmd = (
-            "python3 -m pip install ply;"
-            f"cd {nfs_mount};"
-            "git clone git://git.linux-nfs.org/projects/bfields/pynfs.git;cd pynfs;-- "
-            f"yes |"
-            f"python setup.py build;cd nfs{version};./testserver.py {nfs_server_name}:{nfs_export}_0 -v --outfile "
+            "dnf install -y python3-ply && "
+            f"git clone git://git.linux-nfs.org/projects/cdmackay/pynfs.git {qrepo} && "
+            f"cd {qrepo} && "
+            "yes | python setup.py build && "
+            f"cd {qrepo}/nfs{version} && "
+            f"./testserver.py {nfs_server_name}:{nfs_export}_0 -v --outfile "
             f"~/pynfs.run --maketree --showomit --rundep all"
         )
 
         out, _ = clients[0].exec_command(cmd=cmd, sudo=True, timeout=600)
+        log.info(f"Pynfs Output:\n {out}")
+
         if "FailureException" in out:
-            OperationFailedError(f"Failed to run {cmd} on {clients[0].hostname}")
+            raise OperationFailedError(f"Failed to run {cmd} on {clients[0].hostname}")
 
         # Parse test output to detect failures
         failed_tests = []
@@ -75,6 +94,10 @@ def run(ceph_cluster, **kw):
         if failed_tests:
             log.error(f"Unexpected pynfs test failures: {failed_tests}")
             return 1
+
+        log.info("================================================")
+        log.info("Pynfs test completed successfully")
+        log.info("================================================")
         return 0
 
     except Exception as e:
@@ -82,5 +105,15 @@ def run(ceph_cluster, **kw):
         return 1
 
     finally:
+        if pynfs_workdir:
+            wd = shlex.quote(pynfs_workdir)
+            try:
+                clients[0].exec_command(
+                    cmd=f"rm -rf -- {wd}",
+                    sudo=True,
+                    check_ec=False,
+                )
+            except Exception as exc:
+                log.warning("Could not remove pynfs workdir %s: %s", pynfs_workdir, exc)
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
