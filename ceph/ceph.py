@@ -1620,7 +1620,9 @@ class CephNode(object):
             except CommandFailed:
                 logger.debug("Encountered a timeout during read post execution.")
             except BaseException as be:
-                logger.debug("Encountered an unknown exception during last read.\n", be)
+                logger.debug(
+                    "Encountered an unknown exception during last read: %r", be
+                )
 
             _exit = channel.recv_exit_status()
             return _out, _err, _exit, _time
