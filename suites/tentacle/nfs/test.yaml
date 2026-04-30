@@ -1,0 +1,6 @@
+tests:
+  - test:
+      abort-on-fail: true
+      desc: Install software pre-requisites for cluster deployment.
+      module: run_dummy.py
+      name:  passing test
