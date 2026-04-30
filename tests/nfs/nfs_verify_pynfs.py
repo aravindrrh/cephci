@@ -11,6 +11,10 @@ log = Log(__name__)
 def run(ceph_cluster, **kw):
     """Run pynfs testserver against the NFS export and check results.
 
+    DELEG* PyNFS failures are expected when Ganesha is built with ``Delegations = false``
+    (default for many Ceph NFS deployments); fixing that requires server/Ganesha config
+    or product support, not this test.
+
     Args:
         **kw: Key/value pairs of configuration information to be used in the test.
     """
@@ -51,6 +55,11 @@ def run(ceph_cluster, **kw):
             ceph_cluster=ceph_cluster,
         )
 
+        # Eenabling read write access to the export
+        client = clients[0]
+        client.exec_command(cmd=f"ceph nfs export update {nfs_name} {nfs_export}_0 rw", sudo=True)
+
+        # Creating a temporary directory for pynfs
         out_mk, _ = clients[0].exec_command(
             cmd="mktemp -d /tmp/cephci-pynfs.XXXXXX",
             sudo=True,
@@ -83,14 +92,19 @@ def run(ceph_cluster, **kw):
 
         # Parse test output to detect failures
         failed_tests = []
-        allowed_failures = {"EID9", "SEQ6"}
+        allowed_failures = {"EID9", "SEQ6", "DELEG7"}
 
         for line in out.splitlines():
             line = line.strip()
             if line.endswith(": FAILURE"):
                 test_id = line.split()[0]
-                if test_id not in allowed_failures:
-                    failed_tests.append(test_id)
+                if test_id in allowed_failures:
+                    continue
+                # NFSv4.2+ OP_ALLOCATE; Ganesha returns NFS4ERR_NOTSUPP on 4.1 exports.
+                if version == "4.1" and test_id.startswith("ALLOC"):
+                    log.info("Ignoring expected ALLOC failure for nfs_version=4.1: %s", test_id)
+                    continue
+                failed_tests.append(test_id)
 
         if failed_tests:
             log.error(f"Unexpected pynfs test failures: {failed_tests}")
