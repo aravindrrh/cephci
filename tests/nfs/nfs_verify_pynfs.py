@@ -66,7 +66,8 @@ def run(ceph_cluster, **kw):
         # Isolate clone/build under /tmp (unique per run); testserver targets the NFS export over the network.
         cmd = (
             "dnf install -y python3-ply && "
-            f"git clone git://git.linux-nfs.org/projects/cdmackay/pynfs.git {qrepo} && "
+            #f"git clone git://git.linux-nfs.org/projects/cdmackay/pynfs.git {qrepo} && "
+            f"git clone https://github.com/s-athani/pynfs.git {qrepo} && "
             f"cd {qrepo} && "
             "yes | python setup.py build && "
             f"cd {qrepo}/nfs{version} && "
