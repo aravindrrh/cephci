@@ -1,0 +1,122 @@
+#===============================================================================================
+#---    NFS v4 ACL tests on upstream nfs-ganesha (built on installer) ---
+# Conf: conf/squid/nfs/1admin-7node-3client.yaml (same family as nfs-ceph-pynfs.yaml)
+# Setup matches nfs-ceph-pynfs.yaml (bootstrap + hosts + OSD + clients); ACL modules
+# mirror suites/tentacle/nfs/tier0-nfs-acl.yaml but use upstream Ganesha.
+#===============================================================================================
+tests:
+
+  - test:
+      name: Setup Upstream NFS and Ceph
+      module: nfs_setup_upstream_with_bootstrap.py
+      abort-on-fail: true
+
+  - test:
+      abort-on-fail: true
+      config:
+        args:
+          attach_ip_address: true
+          labels: apply-all-labels
+        command: add_hosts
+        service: host
+      desc: "Adding hosts to the cluster using labels and IP information."
+      destroy-cluster: false
+      module: test_host.py
+      name: "Test host add with labels and IP"
+  - test:
+      abort-on-fail: true
+      config:
+        args:
+          all-available-devices: true
+        command: apply
+        service: osd
+      desc: "Deploying OSD daemons using all-available-devices option."
+      destroy-cluster: false
+      module: test_osd.py
+      name: "Test apply osd with all-available-devices option"
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node4
+        copy_admin_keyring: true
+      desc: Configure the RGW,RBD client system
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.2
+        node: node5
+        copy_admin_keyring: true
+      desc: Configure the RGW,RBD client system
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.3
+        node: node6
+        copy_admin_keyring: true
+      desc: Configure the RGW,RBD client system
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.4
+        node: node7
+        copy_admin_keyring: true
+      desc: Configure the RGW,RBD client system
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      name: NFS ACL - Functional Tests (upstream Ganesha)
+      module: upstream_nfs_acl_functional.py
+      desc: >
+        Core NFSv4 ACL behaviour on upstream nfs-ganesha: ACL ops, ACE ordering,
+        permissions, identity, inheritance flags, POSIX interaction, symlinks,
+        recursive apply, persistence (rename, hardlink, ganesha restart). Reboot
+        persistence is commented out in the test module (manual ganesha is not restored after reboot).
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+        mount_type: nfs
+
+  - test:
+      name: NFS ACL - Negative Tests (upstream Ganesha)
+      module: upstream_nfs_acl_negative.py
+      desc: >
+        Denial and failure paths on upstream nfs-ganesha: invalid spec atomicity,
+        deny-before-allow, append-only, delete control, UID/GID cases, symlink -P vs -L.
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+        mount_type: nfs
+
+  - test:
+      name: NFS ACL - Scale Tests (upstream Ganesha)
+      module: upstream_nfs_acl_scale.py
+      desc: >
+        Large ACL handling on upstream nfs-ganesha: 2000+ ACEs, counts, random access,
+        performance, overwrite/append/duplicate, scale limit, persistence after remount.
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+        mount_type: nfs

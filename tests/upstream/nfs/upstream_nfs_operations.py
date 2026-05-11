@@ -170,6 +170,34 @@ EXPORT {
     Enable_nfs_coredump(nfs_nodes)
 
 
+def restart_upstream_ganesha(installer_node):
+    """
+    Restart the manually built nfs-ganesha daemon on the installer node
+    (same binary and config as setup_nfs_cluster).
+    """
+    pid = ""
+    try:
+        out = installer_node.exec_command(sudo=True, cmd="pgrep ganesha")
+        pid = out[0].strip()
+    except Exception:
+        pass
+    if pid:
+        installer_node.exec_command(sudo=True, cmd=f"kill -9 {pid}")
+    installer_node.exec_command(
+        sudo=True,
+        cmd=(
+            "nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf "
+            "-L /var/log/ganesha.log"
+        ),
+    )
+    out = installer_node.exec_command(sudo=True, cmd="pgrep ganesha")
+    pid = out[0].strip()
+    if not pid:
+        raise OperationFailedError("Failed to restart upstream nfs-ganesha")
+    sleep(15)
+    log.info("Upstream nfs-ganesha restarted on %s", installer_node.hostname)
+
+
 def create_export(installer_node, nfs_export, squash="None"):
     conf_template = """
     EXPORT {
