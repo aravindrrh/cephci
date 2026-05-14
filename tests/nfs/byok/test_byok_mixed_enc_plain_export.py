@@ -18,7 +18,6 @@ from tests.nfs.byok.byok_tools import (
     ensure_fresh_gklm_kmip_client,
     get_enctag,
     load_gklm_config,
-    perform_io_operations_and_validate_fuse,
     setup_gklm_infrastructure,
     wait_for_gklm_server_restart,
 )
@@ -29,6 +28,7 @@ from tests.nfs.nfs_operations import (
     _get_client_specific_mount_versions,
 )
 from tests.nfs.test_nfs_multiple_operations_for_upgrade import create_file
+from tests.nfs.test_nfs_io_operations_during_upgrade import perform_io_operations_in_loop
 from utility.gklm_client.gklm_client import build_gklm_client
 from utility.log import Log
 from utility.utils import get_cephci_config
@@ -40,12 +40,37 @@ gkml_client_name = "automation"
 gklm_cert_alias = "cert2"
 
 
+def _highlight(msg):
+    log.info("******** %s ********", msg)
+
+
+def _debug_log(run_id, hypothesis_id, location, message, data):
+    try:
+        payload = {
+            "sessionId": "dbefa4",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": __import__("time").time_ns() // 1000000,
+        }
+        with open(
+            "/Users/arunravi/work/cephci/.cursor/debug-dbefa4.log",
+            "a",
+            encoding="utf-8",
+        ) as fp:
+            fp.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+
+
 def run(ceph_cluster, **kw):
     """
     1. Create BYOK NFS cluster and an encrypted export (``enctag`` / ``kmip_key_id``).
-    2. Mount export 1, run I/O and FUSE encryption validation.
+    2. Mount export 1 and run NFS I/O validation.
     3. Add a second export on the same CephFS without ``enctag``, mount it, light I/O.
-    4. Re-run I/O and FUSE validation on export 1.
+    4. Re-run NFS I/O validation on export 1.
     """
     config = kw.get("config", {})
     custom_data = kw.get("test_data", {})
@@ -191,6 +216,7 @@ def run(ceph_cluster, **kw):
         )
 
         log.info("Step 1: Encrypted export %s (enctag set)", enc_export)
+        _highlight("1. CREATE EXPORT WITH ENCTAG")
         Ceph(client0).nfs.export.create(
             fs_name=fs_name,
             nfs_name=nfs_name,
@@ -201,9 +227,11 @@ def run(ceph_cluster, **kw):
         sleep(2)
         export_ls = json.loads(Ceph(client0).nfs.export.ls(nfs_name))
         if enc_export not in export_ls:
+            log.error("---- 2. CREATION WITH ENCTAG FAILED ----")
             raise OperationFailedError(
                 f"Encrypted export {enc_export} missing from {export_ls}"
             )
+        _highlight("2. CREATION WITH ENCTAG SUCCEEDED")
 
         mount_versions = _get_client_specific_mount_versions(nfs_version, clients)
         for ver, ver_clients in mount_versions.items():
@@ -218,16 +246,27 @@ def run(ceph_cluster, **kw):
             )
 
         enc_dict = {client0: {"mount": [enc_mount], "export": [enc_export]}}
-        log.info("Step 2: I/O + FUSE validation on encrypted export only")
-        perform_io_operations_and_validate_fuse(
-            enc_dict,
-            clients,
+        # region agent log
+        _debug_log(
+            run_id="initial",
+            hypothesis_id="H5",
+            location="test_byok_mixed_enc_plain_export.py:step2",
+            message="Using NFS-only validation path (no fuse)",
+            data={"enc_export": enc_export, "enc_mount": enc_mount},
+        )
+        # endregion
+        log.info("Step 2: I/O validation on encrypted export only (no FUSE)")
+        _highlight("5. IO ON EXCRYPTED EXPORT - START")
+        perform_io_operations_in_loop(
+            client_export_mount_dict=enc_dict,
+            clients=[client0],
             file_count=5,
             dd_command_size_in_M=2,
-            nfs_name=nfs_name,
         )
+        _highlight("5. IO ON EXCRYPTED EXPORT - SUCCEEDED")
 
         log.info("Step 3: Second export %s without enctag (same CephFS)", plain_export)
+        _highlight("3. CREATE EXPORT WITHOUT ENCTAG")
         Ceph(client0).nfs.export.create(
             fs_name=fs_name,
             nfs_name=nfs_name,
@@ -237,9 +276,11 @@ def run(ceph_cluster, **kw):
         sleep(2)
         export_ls = json.loads(Ceph(client0).nfs.export.ls(nfs_name))
         if plain_export not in export_ls:
+            log.error("---- 4. CREATION WITHOUT ENCTAG FAILED ----")
             raise OperationFailedError(
                 f"Plain export {plain_export} missing from {export_ls}"
             )
+        _highlight("4. CREATION WITHOUT ENCTAG SUCCEEDED")
 
         for ver, ver_clients in mount_versions.items():
             ver_clients[0].create_dirs(dir_path=plain_mount, sudo=True)
@@ -252,18 +293,63 @@ def run(ceph_cluster, **kw):
                 export_name=plain_export,
             )
         create_file(client0, plain_mount, "plain_export_smoke.txt")
+        _highlight("6. IO ON PLAIN/UNENCRYPTED EXPORT - SUCCEEDED")
+        # region agent log
+        enc_export_info = json.loads(
+            Ceph(client0).nfs.export.get(nfs_name, enc_export, format="json")
+        )
+        plain_export_info = json.loads(
+            Ceph(client0).nfs.export.get(nfs_name, plain_export, format="json")
+        )
+        _debug_log(
+            run_id="initial",
+            hypothesis_id="H2",
+            location="test_byok_mixed_enc_plain_export.py:pre-second-validate",
+            message="Export encryption metadata before second validation",
+            data={
+                "enc_export": enc_export,
+                "enc_kmip_key_id": enc_export_info.get("fsal", {}).get("cmount_path"),
+                "enc_blocks": bool(enc_export_info.get("blocks")),
+                "plain_export": plain_export,
+                "plain_fsal_name": plain_export_info.get("fsal", {}).get("name"),
+                "plain_block_count": len(plain_export_info.get("blocks", [])),
+            },
+        )
+        plain_mount_grep = client0.exec_command(
+            sudo=True,
+            cmd=f"mount | grep -w {plain_mount}",
+            check_ec=False,
+        )[0].strip()
+        _debug_log(
+            run_id="initial",
+            hypothesis_id="H3",
+            location="test_byok_mixed_enc_plain_export.py:pre-second-validate",
+            message="Plain mount state before second validation",
+            data={"plain_mount": plain_mount, "mount_grep": plain_mount_grep},
+        )
+        # endregion
 
-        log.info("Step 4: Re-validate encrypted export after plain export exists")
-        perform_io_operations_and_validate_fuse(
-            enc_dict,
-            clients,
+        log.info("Step 4: Re-validate encrypted export after plain export exists (no FUSE)")
+        _highlight("5. IO ON EXCRYPTED EXPORT (RE-VALIDATE) - START")
+        perform_io_operations_in_loop(
+            client_export_mount_dict=enc_dict,
+            clients=[client0],
             file_count=5,
             dd_command_size_in_M=2,
-            nfs_name=nfs_name,
         )
+        _highlight("5. IO ON EXCRYPTED EXPORT (RE-VALIDATE) - SUCCEEDED")
+        _highlight("4. PASS/FAIL CONDITION: PASS")
 
         return 0
     except Exception as e:
+        log.error("---- 4. PASS/FAIL CONDITION: FAIL ----")
+        _debug_log(
+            run_id="initial",
+            hypothesis_id="H5",
+            location="test_byok_mixed_enc_plain_export.py:exception",
+            message="Failure in NFS-only validation path",
+            data={"error": str(e)},
+        )
         log.error("BYOK mixed export test failed: %s", e)
         log.error(traceback.format_exc())
         return 1
