@@ -188,6 +188,18 @@ tests:
             nfs_instance_name: nfs_byok
 
      - test:
+         name: BYOK encrypted export stable after plain export on same CephFS
+         module: byok.test_byok_mixed_enc_plain_export.py
+         desc: Export with enctag and I/O, add export without enctag, re-verify encrypted export
+         polarion-id: CEPH-83650001
+         config:
+           nfs_version: 4.2
+           clients: 1
+           nfs_mount: /mnt/nfs_byok_mix
+           nfs_export: /export_byok_mix
+           nfs_instance_name: nfs_byok_mix
+
+     - test:
          name: byok multicluster with io and restart - parallel module
          module: test_parallel.py
          desc: byok multicluster + restart - parallel module
