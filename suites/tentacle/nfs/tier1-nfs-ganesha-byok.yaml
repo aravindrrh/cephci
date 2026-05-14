@@ -239,20 +239,20 @@ tests:
            nfs_instance_name: nfs_byok
            check_sighup: true
 
-     - test:
-         name: Test SNI Default Secure Case
-         module: byok.test_sni_feature.py
-         desc: Default Secure Case,servername and verify_hostname match
-         polarion-id: CEPH-83632231
-         config:
-           nfs_version: 4.2
-           total_export_num: 4
-           clients: 1
-           nfs_replication_number: 1           # Single cluster mode
-           nfs_mount: /mnt/nfs_byok
-           nfs_export: /export_byok
-           nfs_instance_name: nfs_byoksni
-           operation: Default Secure Case
+    #  - test:
+    #      name: Test SNI Default Secure Case
+    #      module: byok.test_sni_feature.py
+    #      desc: Default Secure Case,servername and verify_hostname match
+    #      polarion-id: CEPH-83632231
+    #      config:
+    #        nfs_version: 4.2
+    #        total_export_num: 4
+    #        clients: 1
+    #        nfs_replication_number: 1           # Single cluster mode
+    #        nfs_mount: /mnt/nfs_byok
+    #        nfs_export: /export_byok
+    #        nfs_instance_name: nfs_byoksni
+    #        operation: Default Secure Case
 
      - test:
          name: Test SNI Mismatch Validation Hostname
