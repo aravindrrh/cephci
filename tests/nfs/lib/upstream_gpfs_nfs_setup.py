@@ -11,13 +11,22 @@ from utility.log import Log
 log = Log(__name__)
 
 CI_TESTS_REPO = "https://github.com/aravindrrh/ci-tests"
-DEFAULT_CI_TESTS_BRANCH = "scale_downstream_arun"
+DEFAULT_CI_TESTS_BRANCH = "scale_downstream"
 MULTI_NODE_SCALE_SCRIPT = (
     "sh ci-tests/build_scripts/common/basic-storage-scale-multi-node.sh"
 )
 DEPLOY_PREREQ_PACKAGES = (
     "elfutils elfutils-devel kernel-devel-$(uname -r) "
     "kernel-headers-$(uname -r) gcc-c++"
+)
+
+# Mount paths used across upstream Scale NFS suites (combined-suite cleanup).
+COMMON_UPSTREAM_MOUNT_POINTS = (
+    "/mnt/nfs",
+    "/mnt/nfsv3",
+    "/mnt/nfsv4",
+    "/mnt/nfsv4_1",
+    "/mnt/multilock_test",
 )
 
 
@@ -102,7 +111,7 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
     exported for basic-storage-scale-multi-node.sh).
 
     Config keys:
-        ci_tests_branch: git branch (default scale_downstream_arun)
+        ci_tests_branch: git branch (default scale_downstream)
         deploy_timeout: per-command timeout in seconds (default 7200)
     """
     conf = config or {}
@@ -241,6 +250,87 @@ def setup_gpfs_nfs(ceph_cluster, config):
     }
 
 
+def get_suite_cleanup_mount_points(config):
+    """Return mount paths to clear between combined-suite tests."""
+    conf = config or {}
+    points = set(COMMON_UPSTREAM_MOUNT_POINTS)
+    mount_point = conf.get("mount_point")
+    if mount_point:
+        points.add(mount_point)
+    extra = conf.get("cleanup_mount_points") or conf.get("mount_points") or []
+    if isinstance(extra, str):
+        extra = [extra]
+    points.update(extra)
+    return sorted(points)
+
+
+def cleanup_nfs_mount_on_node(node, nfs_mount, remove_mount_dir=True):
+    """rm -rf mount contents, unmount, and optionally remove the mount directory."""
+    host = node.hostname
+    try:
+        node.exec_command(
+            cmd=f"bash -lc 'sync; rm -rf {nfs_mount}/* 2>/dev/null; true'",
+            sudo=True,
+            check_ec=False,
+        )
+    except Exception as exc:
+        log.warning("cleanup rm under %s on %s: %s", nfs_mount, host, exc)
+    sleep(1)
+    for umount_cmd in (
+        f"umount -f {nfs_mount} 2>/dev/null || true",
+        f"umount -l {nfs_mount} 2>/dev/null || true",
+    ):
+        try:
+            node.exec_command(cmd=umount_cmd, sudo=True, check_ec=False)
+        except Exception as exc:
+            log.warning("cleanup %s on %s (%s): %s", umount_cmd, host, nfs_mount, exc)
+    sleep(1)
+    try:
+        out = Unmount(node).unmount(nfs_mount)
+        if out:
+            log.warning("Unmount helper %s on %s: %s", nfs_mount, host, out)
+    except Exception as exc:
+        log.warning("Unmount helper failed for %s on %s: %s", nfs_mount, host, exc)
+    if remove_mount_dir:
+        try:
+            node.exec_command(cmd=f"rm -rf {nfs_mount}", sudo=True, check_ec=False)
+        except Exception as exc:
+            log.warning("cleanup rmdir %s on %s: %s", nfs_mount, host, exc)
+
+
+def cleanup_upstream_nfs_mounts(nodes, mount_points=None, remove_mount_dir=True):
+    """
+    Clear NFS mount data and unmount on all given nodes.
+
+    Used between tests in a combined suite so the next test starts clean.
+    """
+    if not nodes:
+        return
+    if not isinstance(nodes, list):
+        nodes = [nodes]
+    points = mount_points or list(COMMON_UPSTREAM_MOUNT_POINTS)
+    log.info(
+        "Suite cleanup: clearing %d mount point(s) on %d node(s)",
+        len(points),
+        len(nodes),
+    )
+    for node in nodes:
+        for nfs_mount in points:
+            cleanup_nfs_mount_on_node(node, nfs_mount, remove_mount_dir=remove_mount_dir)
+    log.info("Suite NFS mount cleanup completed")
+
+
+def run_suite_cleanup(ceph_cluster, config):
+    """Run combined-suite mount cleanup on all clients when enabled in config."""
+    conf = config or {}
+    if conf.get("suite_cleanup", True) is False:
+        return
+    nodes = ceph_cluster.get_nodes("client")
+    cleanup_upstream_nfs_mounts(
+        nodes, get_suite_cleanup_mount_points(conf), remove_mount_dir=True
+    )
+
+
 def teardown_gpfs_nfs(clients, nfs_mount):
     """Remove data under the mount, unmount, and delete the mount point."""
     if not isinstance(clients, list):
@@ -257,9 +347,4 @@ def teardown_gpfs_nfs(clients, nfs_mount):
                 log.warning("rm under %s failed, retrying: %s", nfs_mount, e)
         if w.expired:
             log.error("Timeout clearing %s on %s", nfs_mount, client.hostname)
-        sleep(2)
-        out = Unmount(client).unmount(nfs_mount)
-        if out:
-            log.warning("umount %s on %s returned: %s", nfs_mount, client.hostname, out)
-        client.exec_command(sudo=True, cmd=f"rm -rf {nfs_mount}", check_ec=False)
-        sleep(1)
+        cleanup_nfs_mount_on_node(client, nfs_mount, remove_mount_dir=True)

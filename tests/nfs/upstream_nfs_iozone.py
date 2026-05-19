@@ -1,7 +1,7 @@
 from os import environ
 
 from cli.exceptions import OperationFailedError
-from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
+from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, run_suite_cleanup, should_skip_deployment
 from utility.log import Log
 
 log = Log(__name__)
@@ -97,5 +97,5 @@ def run (ceph_cluster, **kw):
         log.error("Iozone setup/run failed: %s", e)
         raise OperationFailedError(f"Iozone setup/run failed: {e}") from e
     finally:
-        pass
+        run_suite_cleanup(ceph_cluster, config)
     return 0

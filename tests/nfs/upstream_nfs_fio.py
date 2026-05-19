@@ -1,27 +1,16 @@
 from cli.exceptions import OperationFailedError
-from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
+from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, run_suite_cleanup, should_skip_deployment
 from utility.log import Log
 
 log = Log(__name__)
 
 
 def run (ceph_cluster, **kw):
-    config = kw.get("config")
-    nfs_mount = config.get("mount_point", "/mnt/nfs")
+    config = kw.get("config") or {}
     clients = ceph_cluster.get_nodes("client")
-    port = config.get("port", "2049")
-    version = config.get("nfs_version", "4.0")
-    nfs_nodes = ceph_cluster.get_nodes("installer")
-    nfs_node = nfs_nodes[0]
-    fs_name = "cephfs"
-    nfs_name = "cephfs-nfs"
-    nfs_export = "/export"
-    fs = "cephfs"
-    nfs_server_name = nfs_node.hostname
 
     log.info("Setup nfs cluster")
     try:
-        config = kw.get("config") or {}
         server = ceph_cluster.get_nodes("installer")[0]
 
         if not should_skip_deployment(config):
@@ -117,5 +106,5 @@ numjobs=4"""
         log.error("FIO run failed: %s", e)
         raise OperationFailedError(f"FIO run failed: {e}") from e
     finally:
-        pass
+        run_suite_cleanup(ceph_cluster, config)
     return 0

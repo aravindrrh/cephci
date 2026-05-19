@@ -1,7 +1,7 @@
 from os import environ
 
 from cli.exceptions import OperationFailedError
-from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
+from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, run_suite_cleanup, should_skip_deployment
 from utility.log import Log
 
 log = Log(__name__)
@@ -94,5 +94,7 @@ def run(ceph_cluster, **kw):
         cmd = "cat /tmp/ltp_run_v4.log"
         out = clients[1].exec_command(cmd=cmd, sudo=True)
         log.info(out)
+
+        run_suite_cleanup(ceph_cluster, config)
 
     return 0

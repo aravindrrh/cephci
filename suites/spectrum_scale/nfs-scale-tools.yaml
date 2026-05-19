@@ -1,0 +1,150 @@
+#===============================================================================================
+# Full combined upstream NFS / Spectrum Scale suite.
+#
+# Single multi-node deploy; each test skips redeploy and cleans up NFS mounts
+# (rm -rf + umount) before the next test runs.
+#
+# Conf: conf/spectrum_scale/spectrum_scale_2node.yaml (installer + 2 clients)
+#
+# DEBUG: passing tests commented out for faster iteration. PJDFS skipped (open
+# bug — EPERM on nfsnobody chmod). Active: Deploy, Lock test, SPECstorage, Pynfs.
+# Deploy is kept (required when skip_deployment: true).
+#===============================================================================================
+tests:
+
+  - test:
+      name: Spectrum Scale multi-node deploy
+      module: upstream_nfs_deploy.py
+      desc: Deploy Scale / NFS once for the combined suite
+      abort-on-fail: true
+      timeout: 14400
+      config:
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: Cthon
+      module: upstream_nfs_cthon.py
+      desc: Cthon tests on Scale-backed NFS
+      abort-on-fail: false
+      timeout: 7200
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: FIO
+      module: upstream_nfs_fio.py
+      desc: FIO on NFSv3 and NFSv4 mounts
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: LTP
+      module: upstream_nfs_ltp.py
+      desc: LTP on NFSv3 (client1) and NFSv4 (client2)
+      abort-on-fail: false
+      timeout: 21600
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: Lock test
+      module: upstream_nfs_lock_test.py
+      desc: nfstest_lock on Scale export
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: Multilock
+      module: upstream_nfs_multilock.py
+      desc: nfs-ganesha multilock split_lock on Scale NFS
+      abort-on-fail: false
+      timeout: 21600
+      config:
+        skip_deployment: true
+        spectrum_scale: true
+        clients: 2
+        mount_point: /mnt/multilock_test
+        nfs_export: /ibm/scale_volume
+        nfs_versions: ["4.1", "3"]
+        multilock_iterations: 5
+        cleanup: true
+
+  - test:
+      name: IOZone
+      module: upstream_nfs_iozone.py
+      desc: IOZone on NFSv3 and NFSv4 mounts
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: SPECstorage
+      module: upstream_nfs_spec_storage.py
+      desc: SPECstorage SWBUILD on Scale-backed NFS
+      abort-on-fail: false
+      timeout: 21600
+      config:
+        skip_deployment: true
+        clients: 2
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume
+        nfs_version: "4.1"
+        benchmark: SWBUILD
+        load: 1
+        incr_load: 1
+        num_runs: 1
+        benchmark_defination:
+          Warmup_time: 30
+          Dir_count: 15
+          Files_per_dir: 30
+          File_size: 3k
+          Instances: 4
+
+  - test:
+      name: PJDFS
+      module: upstream_nfs_pjdfs.py
+      desc: pjdfstest on NFSv3 and NFSv4 mounts
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: Pynfs
+      module: upstream_nfs_pynfs.py
+      desc: Pynfs client tests on Scale-backed NFS
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: MDTest
+      module: upstream_nfs_mdtest.py
+      desc: mdtest on NFSv3 and NFSv4 mounts
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume

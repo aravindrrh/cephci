@@ -1,7 +1,12 @@
 from os import environ
 
 from cli.exceptions import OperationFailedError
-from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
+from tests.nfs.lib.upstream_gpfs_nfs_setup import (
+    DEFAULT_CI_TESTS_BRANCH,
+    deploy_gpfs_scale,
+    run_suite_cleanup,
+    should_skip_deployment,
+)
 from utility.log import Log
 
 log = Log(__name__)
@@ -25,12 +30,13 @@ def run(ceph_cluster, **kw):
                 f'echo "export EXPORT=\"{export_name}\"" >> ~/.bashrc && source ~/.bashrc',
                 "rm -rf ci-tests/",
                 "yum install -y git wget",
-                "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
+                f"git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout {DEFAULT_CI_TESTS_BRANCH}",
                 "sh ci-tests/build_scripts/pynfs/client.sh"]
 
+        pynfs_timeout = int(config.get("pynfs_timeout", config.get("timeout", 14400)))
         for cmd in cmds:
             exit_code = client.exec_command(
-                cmd=cmd, sudo=True, long_running=True, timeout=7200
+                cmd=cmd, sudo=True, long_running=True, timeout=pynfs_timeout
             )
             if exit_code != 0:
                 log.error(
@@ -45,5 +51,7 @@ def run(ceph_cluster, **kw):
     except Exception as e:
         log.error("Pynfs setup/run failed: %s", e)
         raise OperationFailedError(f"Pynfs setup/run failed: {e}") from e
+    finally:
+        run_suite_cleanup(ceph_cluster, config)
 
     return 0

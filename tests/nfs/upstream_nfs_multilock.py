@@ -12,7 +12,11 @@ from time import sleep
 from cli.exceptions import OperationFailedError
 from cli.utilities.filesys import Mount
 from nfs_operations import setup_nfs_cluster
-from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
+from tests.nfs.lib.upstream_gpfs_nfs_setup import (
+    deploy_gpfs_scale,
+    run_suite_cleanup,
+    should_skip_deployment,
+)
 
 from utility.log import Log
 
@@ -425,3 +429,4 @@ def run(ceph_cluster, **kw):
                 _cleanup_posix_mounts(posix_nodes, nfs_mount)
             except Exception as exc:
                 log.warning("multilock cleanup failed: %s", exc)
+        run_suite_cleanup(ceph_cluster, config)

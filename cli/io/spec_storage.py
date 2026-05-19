@@ -3,7 +3,6 @@ import os
 import xml.etree.ElementTree as ET
 
 from cli import Cli
-from cli.utilities.packages import Package
 
 
 class SpecStorageError(Exception):
@@ -11,47 +10,75 @@ class SpecStorageError(Exception):
 
 
 class SpecStorage(Cli):
+    INSTALL_PREREQS = "dnf install -y wget tar gzip sshpass"
+
     def __init__(self, primary_client):
         super(SpecStorage, self).__init__(primary_client)
         self.primary_client = primary_client
-        self.packages = ["matplotlib", "PyYAML", "pylibyaml"]
         self.config = "sfs_rc"
-        self.install_dest = "/root/specStorage/"
-        self.base_cmd = f"python3 {self.install_dest}SPECstorage2020/SM2020"
+        self.install_dest = "/root/specStorage"
+        self.sm2020 = f"{self.install_dest}/SPECstorage2020/SM2020"
+        self.base_cmd = f"python3 {self.sm2020}"
         self.outputlog = "result"
         self.benchmark_file = "storage2020.yml"
         self.install_loc = "http://magna002.ceph.redhat.com/spec_storage/"
 
-    def install_spec_storage(self):
-        """
-        Install SPECstorage
-        """
-        try:
-            # Install prerequiste packages
-            Package(self.primary_client).install("sshpass", nogpgcheck=True)
-            for package in self.packages:
-                Package(self.primary_client).pip_install(package)
-
-            # Add SpecStorage tool
-            self.execute(sudo=True, cmd=f"mkdir -p {self.install_dest}")
-            cmd = (
-                f"wget {self.install_loc}SPECstorage2020-2529.tgz "
-                f"-O {self.install_dest}/SPECstorage2020-2529.tgz"
+    def _execute_checked(self, cmd, timeout=3600, long_running=False):
+        """Run a command and fail fast when exit code is non-zero."""
+        # Cli.execute() does not forward verbose=; call the node directly.
+        out, err, exit_code, _duration = self.primary_client.exec_command(
+            sudo=True,
+            cmd=cmd,
+            verbose=True,
+            timeout=timeout,
+            long_running=long_running,
+            check_ec=False,
+        )
+        if exit_code != 0:
+            raise SpecStorageError(
+                f"Command failed (exit {exit_code}): {cmd}\nstdout: {out}\nstderr: {err}"
             )
-            self.execute(sudo=True, cmd=cmd)
-            cmd = (
+        return out, err
+
+    def _verify_install_layout(self):
+        """Confirm SPECstorage tarball was extracted before running SM2020."""
+        try:
+            self._execute_checked(
+                f"test -x {self.sm2020} && "
+                f"test -f {self.install_dest}/SPECstorage2020/{self.benchmark_file}"
+            )
+        except SpecStorageError as exc:
+            listing, _, _, _ = self.primary_client.exec_command(
+                sudo=True,
+                cmd=f"ls -la {self.install_dest}",
+                verbose=True,
+                check_ec=False,
+            )
+            raise SpecStorageError(
+                f"SPECstorage install incomplete: missing {self.sm2020}\n"
+                f"{self.install_dest} contents:\n{listing}"
+            ) from exc
+
+    def install_spec_storage(self):
+        """Install SPECstorage toolkit on the primary client."""
+        tarball = f"{self.install_dest}/SPECstorage2020-2529.tgz"
+        try:
+            self._execute_checked(self.INSTALL_PREREQS)
+            self._execute_checked(f"mkdir -p {self.install_dest}")
+            self._execute_checked(
+                f"wget {self.install_loc}SPECstorage2020-2529.tgz -O {tarball}"
+            )
+            self._execute_checked(
                 f"wget {self.install_loc}SPECstorage_clients.sh "
                 f"-O {self.install_dest}/SPECstorage_clients.sh"
             )
-            self.execute(sudo=True, cmd=cmd)
-            cmd = f"tar zxvf {self.install_dest}/SPECstorage2020-2529.tgz -C {self.install_dest}"
-            self.execute(sudo=True, cmd=cmd)
-
-            # Run SPECstorage clients script
-            cmd = f". {self.install_dest}/SPECstorage_clients.sh"
-            self.execute(sudo=True, cmd=cmd)
-        except Exception:
-            raise SpecStorageError("SPECstorage installation failed")
+            self._execute_checked(f"tar zxvf {tarball} -C {self.install_dest}")
+            self._execute_checked(f". {self.install_dest}/SPECstorage_clients.sh")
+            self._verify_install_layout()
+        except SpecStorageError:
+            raise
+        except Exception as exc:
+            raise SpecStorageError(f"SPECstorage installation failed: {exc}") from exc
 
     def update_config(
         self,
@@ -74,50 +101,39 @@ class SpecStorage(Cli):
             nfs_mount (str): Clients mount points
             benchmark_defination (dir) : benchmark defination parameters with values
         """
+        config_path = f"{self.install_dest}/{self.config}"
+        benchmark_yml = f"{self.install_dest}/SPECstorage2020/{self.benchmark_file}"
         try:
-            # Add config file "sfc_rc"
-            cmd = f"wget  {self.install_loc}/{self.config} -O {self.install_dest}/{self.config}"
-            self.execute(sudo=True, cmd=cmd)
-            # Update installer Location
-            cmd = (
-                f"sed -i '/EXEC_PATH=/d' {self.install_dest}/{self.config} && "
-                f"echo EXEC_PATH={self.install_dest}/SPECstorage2020/binaries/linux/x86_64/netmist >> "
-                f"{self.install_dest}/{self.config}"
+            self._execute_checked(
+                f"wget {self.install_loc}/{self.config} -O {config_path}"
             )
-            self.execute(sudo=True, cmd=cmd)
+            self._execute_checked(
+                f"sed -i '/EXEC_PATH=/d' {config_path} && "
+                f"echo EXEC_PATH={self.install_dest}/SPECstorage2020/binaries/linux/x86_64/netmist >> "
+                f"{config_path}"
+            )
 
-            # Update clients with mount point
             client_mountpoints = "CLIENT_MOUNTPOINTS="
             for client in clients:
-                client_mountpoints += f"{client.hostname}:{nfs_mount} "
-            cmd = f"echo {client_mountpoints.rstrip()} >> {self.install_dest}/{self.config}"
-            self.execute(sudo=True, cmd=cmd)
+                client_mountpoints += f"{client.ip_address}:{nfs_mount} "
+            self._execute_checked(
+                f"echo {client_mountpoints.rstrip()} >> {config_path}"
+            )
+            self._execute_checked(f"echo BENCHMARK={benchmark} >> {config_path}")
+            self._execute_checked(f"echo LOAD={load} >> {config_path}")
+            self._execute_checked(f"echo INCR_LOAD={incr_load} >> {config_path}")
+            self._execute_checked(f"echo NUM_RUNS={num_runs} >> {config_path}")
 
-            # Update benchmark
-            cmd = f"echo BENCHMARK={benchmark} >> {self.install_dest}/{self.config}"
-            self.execute(sudo=True, cmd=cmd)
-
-            # Update load
-            cmd = f"echo LOAD={load} >> {self.install_dest}/{self.config}"
-            self.execute(sudo=True, cmd=cmd)
-
-            # Update incr_load
-            cmd = f"echo INCR_LOAD={incr_load} >> {self.install_dest}/{self.config}"
-            self.execute(sudo=True, cmd=cmd)
-
-            # Update num_runs
-            cmd = f"echo NUM_RUNS={num_runs} >> {self.install_dest}/{self.config}"
-            self.execute(sudo=True, cmd=cmd)
-
-            # Update benchmark defination
-            for parameter, value in benchmark_defination.items():
-                cmd = (
-                    f"sed -i '/Benchmark_name:/,/{parameter}:/ s/{parameter}:.*/{parameter}: {value}/'"
-                    f" {self.install_dest}/{self.benchmark_file}"
-                )
-                self.execute(sudo=True, cmd=cmd)
-        except Exception:
-            raise SpecStorageError("SPECstorage Configuration failed")
+            if benchmark_defination:
+                for parameter, value in benchmark_defination.items():
+                    self._execute_checked(
+                        f"sed -i '/Benchmark_name:/,/{parameter}:/ s/{parameter}:.*/{parameter}: {value}/'"
+                        f" {benchmark_yml}"
+                    )
+        except SpecStorageError:
+            raise
+        except Exception as exc:
+            raise SpecStorageError(f"SPECstorage configuration failed: {exc}") from exc
 
     def run_spec_storage(
         self,
@@ -154,13 +170,25 @@ class SpecStorage(Cli):
         )
         nfs_mount = nfs_mount.rstrip("/")
         last_path_component = os.path.basename(nfs_mount)
-        # Run SPECstorage
+        benchmark_yml = f"{self.install_dest}/SPECstorage2020/{self.benchmark_file}"
+        config_path = f"{self.install_dest}/{self.config}"
         cmd = (
-            f"{self.base_cmd} -b {self.install_dest}/SPECstorage2020/{self.benchmark_file}"
-            f" -r {self.install_dest}/{self.config}"
-            f" -s {benchmark}-{self.outputlog}-{last_path_component}"
+            f"{self.base_cmd} -b {benchmark_yml} -r {config_path} "
+            f"-s {benchmark}-{self.outputlog}-{last_path_component}"
         )
-        return self.execute(sudo=True, long_running=True, cmd=cmd, timeout=5400)
+        _out, _err, exit_code, _duration = self.primary_client.exec_command(
+            sudo=True,
+            long_running=True,
+            cmd=cmd,
+            verbose=True,
+            timeout=7200,
+            check_ec=False,
+        )
+        if exit_code != 0:
+            raise SpecStorageError(
+                f"SPECstorage run failed (exit {exit_code}): {cmd}\nstdout: {_out}\nstderr: {_err}"
+            )
+        return 0
 
     def append_to_csv(self, output_file, metrics):
         fieldnames = list(metrics.keys())
