@@ -10,12 +10,146 @@ from utility.log import Log
 
 log = Log(__name__)
 
-_SERVER_CI_CMDS = [
-    "rm -rf ci-tests/",
-    "yum install -y git wget",
-    "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
-    "sh ci-tests/build_scripts/common/basic-storage-scale.sh",
-]
+CI_TESTS_REPO = "https://github.com/aravindrrh/ci-tests"
+DEFAULT_CI_TESTS_BRANCH = "scale_downstream_arun"
+MULTI_NODE_SCALE_SCRIPT = (
+    "sh ci-tests/build_scripts/common/basic-storage-scale-multi-node.sh"
+)
+DEPLOY_PREREQ_PACKAGES = (
+    "elfutils elfutils-devel kernel-devel-$(uname -r) "
+    "kernel-headers-$(uname -r) gcc-c++"
+)
+
+
+def should_skip_deployment(config):
+    """Return True when cluster deploy should be skipped (already prepared)."""
+    conf = config or {}
+    skip_deploy = environ.get("SKIP_DEPLOYMENT", "").lower() == "true"
+    if "skip_deployment" in conf:
+        sd = conf.get("skip_deployment")
+        if isinstance(sd, str):
+            skip_deploy = sd.strip().lower() in ("true", "1", "yes")
+        else:
+            skip_deploy = bool(sd)
+    return skip_deploy
+
+
+def add_etc_host_entries(nodes):
+    """Append cluster host entries to /etc/hosts on every node."""
+    etc_hosts_string = ""
+    for node in nodes:
+        etc_hosts_string += f"{node.ip_address} {node.hostname}\n"
+
+    for node in nodes:
+        node.exec_command(cmd=f"echo '{etc_hosts_string}' >> /etc/hosts", sudo=True)
+
+
+def setup_passwordless_ssh(nodes):
+    """Configure passwordless SSH between all nodes."""
+    log.info("Setting up passwordless SSH between all nodes")
+
+    for node in nodes:
+        log.info("Generating SSH key on %s", node.hostname)
+        node.exec_command(
+            cmd="[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa",
+            sudo=True,
+        )
+
+    public_keys = {}
+    for node in nodes:
+        log.info("Collecting public key from %s", node.hostname)
+        out, _ = node.exec_command(cmd="cat ~/.ssh/id_rsa.pub", sudo=True)
+        public_keys[node.hostname] = out.strip()
+
+    for node in nodes:
+        log.info("Distributing public keys to %s", node.hostname)
+        node.exec_command(cmd="mkdir -p ~/.ssh && chmod 700 ~/.ssh", sudo=True)
+        node.exec_command(
+            cmd="touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys",
+            sudo=True,
+        )
+        for pub_key in public_keys.values():
+            check_cmd = (
+                f"grep -q '{pub_key}' ~/.ssh/authorized_keys || "
+                f"echo '{pub_key}' >> ~/.ssh/authorized_keys"
+            )
+            node.exec_command(cmd=check_cmd, sudo=True)
+
+        ssh_config = """Host *
+StrictHostKeyChecking no
+UserKnownHostsFile=/dev/null"""
+        node.exec_command(
+            cmd=f"echo '{ssh_config}' > ~/.ssh/config && chmod 600 ~/.ssh/config",
+            sudo=True,
+        )
+
+    log.info("Passwordless SSH setup completed successfully")
+
+
+def install_deploy_prereq_packages(nodes):
+    """Install kernel/elfutils build deps required by multi-node Scale deploy."""
+    log.info("Installing deploy prerequisite packages on all nodes")
+    cmd = f"yum install -y {DEPLOY_PREREQ_PACKAGES}"
+    for node in nodes:
+        node.exec_command(cmd=cmd, sudo=True)
+
+
+def deploy_gpfs_scale(ceph_cluster, config=None):
+    """
+    Deploy multi-node IBM Spectrum Scale / NFS via ci-tests on the installer.
+
+    Expects installer + at least two client nodes (node2/node3 hostnames are
+    exported for basic-storage-scale-multi-node.sh).
+
+    Config keys:
+        ci_tests_branch: git branch (default scale_downstream_arun)
+        deploy_timeout: per-command timeout in seconds (default 7200)
+    """
+    conf = config or {}
+    branch = conf.get("ci_tests_branch", DEFAULT_CI_TESTS_BRANCH)
+    timeout = int(conf.get("deploy_timeout", 7200))
+
+    server = ceph_cluster.get_nodes("installer")[0]
+    clients = ceph_cluster.get_nodes("client")
+    if len(clients) < 2:
+        raise ConfigError(
+            "Multi-node Spectrum Scale deploy requires at least two client nodes"
+        )
+
+    node2 = clients[0].hostname
+    node3 = clients[1].hostname
+    nodes = ceph_cluster.get_nodes()
+
+    add_etc_host_entries(nodes)
+    install_deploy_prereq_packages(nodes)
+    setup_passwordless_ssh(nodes)
+
+    server_cmds = [
+        "rm -rf ci-tests/",
+        "yum install -y git wget",
+        f'echo "export node2=\\"{node2}\\"" >> ~/.bashrc && source ~/.bashrc',
+        f'echo "export node3=\\"{node3}\\"" >> ~/.bashrc && source ~/.bashrc',
+        f"git clone {CI_TESTS_REPO}; cd ci-tests; git checkout {branch}",
+        MULTI_NODE_SCALE_SCRIPT,
+    ]
+
+    log.info(
+        "Deploying multi-node Spectrum Scale / NFS on installer %s "
+        "(node2=%s node3=%s branch=%s)",
+        server.hostname,
+        node2,
+        node3,
+        branch,
+    )
+    for cmd in server_cmds:
+        rc = server.exec_command(cmd=cmd, sudo=True, long_running=True, timeout=timeout)
+        if rc != 0:
+            raise OperationFailedError(
+                f"GPFS multi-node deploy command failed (exit {rc}): {cmd}"
+            )
+
+    log.info("Multi-node Spectrum Scale / NFS deployment completed")
+    return {"server": server, "node2": node2, "node3": node3}
 
 
 def setup_gpfs_nfs(ceph_cluster, config):
@@ -29,7 +163,7 @@ def setup_gpfs_nfs(ceph_cluster, config):
     Config keys:
         mount_point, nfs_export, port, nfs_version, clients, mount_type
         skip_deployment: if present (bool), overrides SKIP_DEPLOYMENT for this run.
-            Use ``true`` on ACL tests after a suite-local deploy step; ``false`` or omit on the deploy step.
+            Use ``true`` after a suite-local deploy step; ``false`` or omit on deploy.
 
     Returns:
         dict with server, clients, nfs_mount, nfs_export, nfs_server_host, port, version, mount_type
@@ -41,13 +175,7 @@ def setup_gpfs_nfs(ceph_cluster, config):
     version = str(conf.get("nfs_version", "4.1"))
     no_clients = int(conf.get("clients", "1"))
     mount_type = conf.get("mount_type", "nfs")
-    skip_deploy = environ.get("SKIP_DEPLOYMENT", "").lower() == "true"
-    if "skip_deployment" in conf:
-        sd = conf.get("skip_deployment")
-        if isinstance(sd, str):
-            skip_deploy = sd.strip().lower() in ("true", "1", "yes")
-        else:
-            skip_deploy = bool(sd)
+    skip_deploy = should_skip_deployment(conf)
 
     server = ceph_cluster.get_nodes("installer")[0]
     clients_all = ceph_cluster.get_nodes("client")
@@ -56,20 +184,9 @@ def setup_gpfs_nfs(ceph_cluster, config):
     clients = clients_all[:no_clients]
 
     if not skip_deploy:
-        log.info(
-            "Deploying Spectrum Scale / NFS on installer node %s",
-            server.hostname,
-        )
-        for cmd in _SERVER_CI_CMDS:
-            rc = server.exec_command(
-                cmd=cmd, sudo=True, long_running=True, timeout=7200
-            )
-            if rc != 0:
-                raise OperationFailedError(
-                    f"GPFS upstream server command failed (exit {rc}): {cmd}"
-                )
+        deploy_gpfs_scale(ceph_cluster, conf)
     else:
-        log.info("SKIP_DEPLOYMENT=true — skipping basic-storage-scale.sh")
+        log.info("skip_deployment set — skipping multi-node Scale deploy")
 
     nfs_server_host = server.ip_address
 

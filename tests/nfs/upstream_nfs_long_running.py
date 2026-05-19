@@ -1,4 +1,5 @@
 from cli.exceptions import OperationFailedError
+from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
 from utility.log import Log
 
 log = Log(__name__)
@@ -9,24 +10,13 @@ def run(ceph_cluster, **kw):
     Args:
         **kw: Key/value pairs of configuration information to be used in the test.
     """
-    config = kw.get("config")
+    config = kw.get("config") or {}
     server = ceph_cluster.get_nodes("installer")[0]
     client = ceph_cluster.get_nodes("client")[0]
 
     try:
-        cmds = ["rm -rf ci-tests/",
-                "yum install -y git wget",
-                "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
-                "sh ci-tests/build_scripts/common/basic-storage-scale.sh"]
-
-        for cmd in cmds:
-            exit_code = server.exec_command(
-                cmd=cmd, sudo=True, long_running=True, timeout="notimeout"
-            )
-            if exit_code != 0:
-                raise OperationFailedError(
-                    f"Long running server command failed (exit {exit_code}): {cmd}"
-                )
+        if not should_skip_deployment(config):
+            deploy_gpfs_scale(ceph_cluster, config)
 
         cmds = [f'echo "export SERVER=\"{server.ip_address}\"" >> ~/.bashrc && source ~/.bashrc',
                 f'echo "export EXPORT=\"/ibm/scale_volume\"" >> ~/.bashrc && source ~/.bashrc',

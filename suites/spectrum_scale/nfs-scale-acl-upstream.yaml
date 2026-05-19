@@ -1,8 +1,9 @@
 #===============================================================================================
 # NFS v4 ACL regression on Spectrum Scale / GPFS (upstream modules).
 #
-# First test runs basic-storage-scale.sh once.  Other tests set skip_deployment: true
-# so they only NFS-mount clients (see tests/nfs/lib/upstream_gpfs_nfs_setup.py).
+# First test runs basic-storage-scale-multi-node.sh once.  Other tests set
+# skip_deployment: true so they only NFS-mount clients
+# (see tests/nfs/lib/upstream_gpfs_nfs_setup.py).
 # SKIP_DEPLOYMENT env still works when skip_deployment is not set in YAML.
 # EXPORT_NAME env overrides nfs_export default (/ibm/scale_volume).
 #
@@ -14,7 +15,7 @@ tests:
   - test:
       name: NFS v4 ACL suite — GPFS deployment
       module: upstream_nfs_acl_deploy.py
-      desc: Run basic-storage-scale.sh on installer and mount NFS on clients (suite bootstrap)
+      desc: Run multi-node Scale deploy on installer (suite bootstrap)
       abort-on-fail: true
       timeout: 14400
       config:

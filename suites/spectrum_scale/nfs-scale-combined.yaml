@@ -18,6 +18,7 @@ tests:
       desc: Verify Cthon tests on nfs ganesha with Scale FSAL
       abort-on-fail: false
       config:
+        skip_deployment: true
         nfs_version: 4.2
         clients: 1
 
@@ -27,6 +28,7 @@ tests:
       desc: Verify FIO tests on nfs ganesha with GPFS Fsal
       abort-on-fail: false
       config:
+        skip_deployment: true
         nfs_version: 4.2
         clients: 1
 
@@ -36,6 +38,7 @@ tests:
       desc: Verify Lock tests (nfs tests) on nfs with scale FSAL
       abort-on-fail: false
       config:
+        skip_deployment: true
         nfs_version: 4.2
         clients: 1
 
@@ -45,6 +48,7 @@ tests:
       desc: Verify LTP tests on nfs ganesha with Scale FSAL from two clients. V3 from c1 and v4 from c2
       abort-on-fail: false
       config:
+        skip_deployment: true
         nfs_version: 4.2
         clients: 1
 
@@ -54,5 +58,6 @@ tests:
       desc: Verify PJDFS tests on nfs ganesha with Scale FSAL from two clients. V3 from c1 and v4 from c2
       abort-on-fail: false
       config:
+        skip_deployment: true
         nfs_version: 4.2
         clients: 1

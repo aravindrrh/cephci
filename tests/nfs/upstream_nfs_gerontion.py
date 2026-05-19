@@ -1,6 +1,7 @@
 import time
 
 from cli.exceptions import OperationFailedError
+from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
 from utility.log import Log
 
 log = Log(__name__)
@@ -130,61 +131,6 @@ def _run_gerontion_workload(client, gerontion_bin, mount, workload_name, timeout
     )
 
 
-def setup_passwordless_ssh(nodes):
-    # Setup passwordless SSH between all nodes
-    log.info("Setting up passwordless SSH between all nodes")
-
-    # Generate SSH keys on all nodes if they don't exist
-    for node in nodes:
-        log.info(f"Generating SSH key on {node.hostname}")
-        node.exec_command(
-            cmd="[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa",
-            sudo=True,
-        )
-
-    # Collect all public keys
-    public_keys = {}
-    for node in nodes:
-        log.info(f"Collecting public key from {node.hostname}")
-        out, _ = node.exec_command(cmd="cat ~/.ssh/id_rsa.pub", sudo=True)
-        public_keys[node.hostname] = out.strip()
-
-    # Distribute all public keys to all nodes
-    for node in nodes:
-        log.info(f"Distributing public keys to {node.hostname}")
-        # Ensure .ssh directory and authorized_keys exist with correct permissions
-        node.exec_command(cmd="mkdir -p ~/.ssh && chmod 700 ~/.ssh", sudo=True)
-        node.exec_command(
-            cmd="touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys",
-            sudo=True,
-        )
-
-        # Add all public keys to authorized_keys (avoiding duplicates)
-        for hostname, pub_key in public_keys.items():
-            # Check if key already exists, if not add it
-            check_cmd = f"grep -q '{pub_key}' ~/.ssh/authorized_keys || echo '{pub_key}' >> ~/.ssh/authorized_keys"
-            node.exec_command(cmd=check_cmd, sudo=True)
-
-        # Disable strict host key checking for seamless SSH
-        ssh_config = """Host *
-StrictHostKeyChecking no
-UserKnownHostsFile=/dev/null"""
-        node.exec_command(
-            cmd=f"echo '{ssh_config}' > ~/.ssh/config && chmod 600 ~/.ssh/config",
-            sudo=True,
-        )
-
-    log.info("Passwordless SSH setup completed successfully")
-
-# Adding the hostnames to the /etc/hosts file
-def add_etc_host_entries(nodes):
-    etc_hosts_string = ""
-    for node in nodes:
-        etc_hosts_string += f"{node.ip_address} {node.hostname}\n"
-
-    for node in nodes:
-        node.exec_command(cmd=f"echo '{etc_hosts_string}' >> /etc/hosts", sudo=True)
-
 def run(ceph_cluster, **kw):
     clients = ceph_cluster.get_nodes("client")
     log.info("Setup nfs cluster")
@@ -207,47 +153,12 @@ def run(ceph_cluster, **kw):
         raw_minutes,
         workload_duration_sec,
     )
-    # export_name = environ['EXPORT_NAME']
     export_name = "/ibm/scale_volume"
-    nodes = ceph_cluster.get_nodes()
 
     try:
         server = ceph_cluster.get_nodes("installer")[0]
-        client = ceph_cluster.get_nodes("client")[0]
-        node2 = client.hostname
-        node3 = ceph_cluster.get_nodes("client")[1].hostname
-
-        # Add the hostnames to the /etc/hosts file
-        add_etc_host_entries(nodes)
-
-        # install dependent packages -  kernel-devel-`uname -r` kernel-headers-`uname -r`
-        # elfutils elfutils-devel on all nodes (clients and installer)
-        log.info("Installing dependent packages on all nodes")
-        for node in ceph_cluster.get_nodes():
-            cmd = "yum install -y elfutils elfutils-devel kernel-devel-$(uname -r) kernel-headers-$(uname -r) gcc-c++"
-            node.exec_command(cmd=cmd, sudo=True)
-
-        # Setup Passwrodless SSH between Nodes
-        log.info("Setting up passwordless SSH between all nodes")
-        setup_passwordless_ssh(ceph_cluster.get_nodes())
-
-        cmds = [
-            "rm -rf ci-tests/",
-            "yum install -y git wget",
-            f'echo "export node2=\"{node2}\"" >> ~/.bashrc && source ~/.bashrc',
-            f'echo "export node3=\"{node3}\"" >> ~/.bashrc && source ~/.bashrc',
-            "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream_arun",
-            "sh ci-tests/build_scripts/common/basic-storage-scale-multi-node.sh",
-        ]  # Copy Gerontion folder to all the clients]
-
-        for cmd in cmds:
-            exit_code = server.exec_command(
-                cmd=cmd, sudo=True, long_running=True, timeout=3600
-            )
-            if exit_code != 0:
-                raise OperationFailedError(
-                    f"IBM Scale installation command failed (exit {exit_code}): {cmd}"
-                )
+        if not should_skip_deployment(config):
+            deploy_gpfs_scale(ceph_cluster, config)
 
         tarball = f"{GPFS_EXTRACT_DIR}/gpfstest.tar.gz"
         for client in clients:

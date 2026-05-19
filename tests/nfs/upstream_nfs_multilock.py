@@ -12,6 +12,7 @@ from time import sleep
 from cli.exceptions import OperationFailedError
 from cli.utilities.filesys import Mount
 from nfs_operations import setup_nfs_cluster
+from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
 
 from utility.log import Log
 
@@ -20,26 +21,6 @@ log = Log(__name__)
 GANESHA_REPO = "https://github.com/nfs-ganesha/nfs-ganesha.git"
 CLONE_ROOT = "/root/nfs-ganesha"
 MULTILOCK_BUILD = f"{CLONE_ROOT}/src/tools/multilock/build"
-
-_SCALE_SERVER_CMDS = [
-    "rm -rf ci-tests/",
-    "yum install -y git wget",
-    "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
-    "sh ci-tests/build_scripts/common/basic-storage-scale.sh",
-]
-
-
-def _spectrum_scale_server_setup(server):
-    """Same server-side Scale / Ganesha prep as upstream_nfs_cthon."""
-    for cmd in _SCALE_SERVER_CMDS:
-        exit_code = server.exec_command(
-            cmd=cmd, sudo=True, long_running=True, timeout=5400
-        )
-        if exit_code != 0:
-            raise OperationFailedError(
-                f"Spectrum Scale server command failed (exit {exit_code}): {cmd}"
-            )
-
 
 def _spectrum_mount_posix_clients(
     client_c1, client_c2, server, nfs_mount, version, nfs_port, export_path
@@ -219,7 +200,8 @@ def run(ceph_cluster, **kw):
                         client_c1.hostname,
                         client_c2.hostname,
                     )
-                    _spectrum_scale_server_setup(installer_node)
+                    if not should_skip_deployment(config):
+                        deploy_gpfs_scale(ceph_cluster, config)
                     spectrum_server_ready = True
                 _spectrum_mount_posix_clients(
                     client_c1,
