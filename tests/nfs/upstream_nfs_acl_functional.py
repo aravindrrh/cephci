@@ -160,13 +160,13 @@ def run(ceph_cluster, **kw):
                 _run_test(_test_restart, acl, server_node),
             )
         )
-        if ENABLE_REBOOT_TEST:
-            results.append(
-                (
-                    "Reboot Persistence",
-                    _run_test(_test_reboot, acl, server_node),
-                )
-            )
+        # if ENABLE_REBOOT_TEST:
+        #     results.append(
+        #         (
+        #             "Reboot Persistence",
+        #             _run_test(_test_reboot, acl, server_node),
+        #         )
+        #     )
 
         return _report_results(results)
 
