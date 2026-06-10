@@ -76,15 +76,27 @@ def run(ceph_cluster, **kw):
         log.info("Mount succeeded on client")
 
         # Test writes on Readonly export
-        _, rc = clients[0].exec_command(
-            sudo=True, cmd=f"touch {nfs_readonly_mount}/file_ro", check_ec=False
+        out, err, exit_code, _ = clients[0].exec_command(
+            sudo=True,
+            cmd=f"touch {nfs_readonly_mount}/file_ro",
+            check_ec=False,
+            verbose=True,
         )
-        # Ignore the "Read-only file system" error and consider it as a successful execution
-        if "touch: cannot touch" in str(rc) and "Read-only file system" in str(rc):
+        touch_output = f"{out or ''}{err or ''}"
+        if exit_code != 0 and (
+            "touch: cannot touch" in touch_output
+            or "Read-only file system" in touch_output
+        ):
             log.info("creation of file on RO export failed with expected error")
-            pass
         else:
-            log.error(f"failed to create file on {clients[0].hostname}")
+            log.error(
+                "Unexpected touch result on RO export for %s: exit=%s out=%r err=%r",
+                clients[0].hostname,
+                exit_code,
+                out,
+                err,
+            )
+            return 1
 
         # Test writes on RW export
         clients[0].exec_command(

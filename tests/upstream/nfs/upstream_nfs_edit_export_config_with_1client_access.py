@@ -29,11 +29,42 @@ def update_export_conf(installer,
             installer.exec_command(sudo=True, cmd=cmd)
 
         ganesha_conf_file = "/etc/ganesha/ganesha.conf"
-        update_cmd = f"sed -i 's/Clients *= *client_address/Clients = {new_clients_values}/' {ganesha_conf_file}"
+        client_ip = new_clients_values
+        client_ip_sed = client_ip.replace(".", r"\.")
+        # EXPORT_DEFAULTS grants RW when no CLIENT matches — remove it so only
+        # the explicit CLIENT ACL applies. Use bare IP (no /32) with Access_Type
+        # in the CLIENT block (verified on upstream Ganesha test beds).
         installer.exec_command(
             sudo=True,
-            cmd=update_cmd,
+            cmd=f"sed -i '/EXPORT_DEFAULTS {{/,/}}/d' {ganesha_conf_file}",
         )
+        installer.exec_command(
+            sudo=True,
+            cmd=(
+                f"sed -i 's|Clients *= *client_address|"
+                f"Clients = {client_ip};|' {ganesha_conf_file}"
+            ),
+        )
+        installer.exec_command(
+            sudo=True,
+            cmd=(
+                f"sed -i '/Clients = {client_ip_sed};/a\\        Access_Type = RW;' "
+                f"{ganesha_conf_file}"
+            ),
+        )
+        # export.create adds Access_Type at EXPORT level; that overrides CLIENT ACL
+        # matching. Drop it for this export only (Pseudo..Squash spans export-level
+        # Access_Type but not the CLIENT block below FSAL).
+        pseudo_escaped = nfs_export_client.replace("/", r"\/")
+        installer.exec_command(
+            sudo=True,
+            cmd=(
+                f"sed -i '/Pseudo = \"{pseudo_escaped}\";/,/Squash = None;/ "
+                f"{{ /^[[:space:]]*Access_Type = RW;$/d; }}' {ganesha_conf_file}"
+            ),
+        )
+        out = installer.exec_command(sudo=True, cmd=f"cat {ganesha_conf_file}")
+        log.info("ganesha.conf after CLIENT ACL update:\n%s", out[0])
         cmd = f"nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf -L /var/log/ganesha.log"
         installer.exec_command(sudo=True, cmd=cmd)
 
@@ -43,8 +74,10 @@ def update_export_conf(installer,
         pid = out[0].strip()
         if not pid:
             raise OperationFailedError("Failed to restart nfs service")
+        # Allow ganesha to finish loading exports before clients mount (see restart_upstream_ganesha)
+        sleep(15)
     except Exception:
-        raise OperationFailedError("failed to edit access type in export conf file")
+        raise OperationFailedError("failed to edit clients in export conf file")
 
 
 def run(ceph_cluster, **kw):
@@ -80,7 +113,7 @@ def run(ceph_cluster, **kw):
     nfs_export_client = "/export_client_access"
     nfs_client_mount = "/mnt/nfs_client_mount"
     original_clients_value = "client_address"
-    new_clients_values = f"{clients[0].ip_address}"
+    new_clients_values = clients[0].ip_address
 
     window_nfs_mount = "Z:"
     # nfs_server_name = [nfs_node.hostname for nfs_node in servers]
@@ -101,7 +134,7 @@ def run(ceph_cluster, **kw):
         for windows_client_obj in setup_windows_clients(config.get("windows_clients")):
             windows_clients.append(windows_client_obj)
         if windows_clients:
-            new_clients_values = f"{windows_clients[0].upstream_nfs_edit_export_config_with_1client_access.py}"
+            new_clients_values = windows_clients[0].ip_address
 
     try:
         # Setup nfs cluster
@@ -146,13 +179,20 @@ def run(ceph_cluster, **kw):
             f"mount -t nfs -o vers={version},port={port} "
             f"{nfs_server_name}:{nfs_export_client} {nfs_client_mount}"
         )
-        _, rc = clients[1].exec_command(cmd=cmd, sudo=True, check_ec=False)
+        _, err, exit_code, _ = clients[1].exec_command(
+            cmd=cmd, sudo=True, check_ec=False, verbose=True
+        )
 
-        if "access denied by server" in str(rc):
+        if exit_code != 0 and "access denied by server" in f"{err or ''}":
             log.info("As expected, Mount on unauthorized client failed")
-            pass
         else:
-            log.error(f"Mount passed on unauthorized client: {clients[0].hostname}")
+            log.error(
+                "Mount unexpectedly succeeded on unauthorized client %s: exit=%s err=%r",
+                clients[1].hostname,
+                exit_code,
+                err,
+            )
+            return 1
 
         sleep(15)
 
