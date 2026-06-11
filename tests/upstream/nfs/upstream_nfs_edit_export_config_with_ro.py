@@ -32,6 +32,8 @@ def update_export_conf(installer, nfs_export_readonly, new_access_type
             sudo=True,
             cmd=update_cmd,
         )
+        out = installer.exec_command(sudo=True, cmd=f"cat {ganesha_conf_file}")
+        log.info("ganesha.conf after Access_Type sed:\n%s", out[0])
         cmd = f"nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf -L /var/log/ganesha.log"
         installer.exec_command(sudo=True, cmd=cmd)
 
@@ -44,6 +46,8 @@ def update_export_conf(installer, nfs_export_readonly, new_access_type
         pid = out[0].strip()
         if not pid:
             raise OperationFailedError("Failed to restart nfs service")
+        # Allow ganesha to finish loading exports before clients mount (see restart_upstream_ganesha)
+        sleep(15)
     except Exception:
         raise OperationFailedError("failed to edit access type in export conf file")
 
@@ -122,19 +126,36 @@ def run(ceph_cluster, **kw):
         log.info("Mount succeeded on client")
 
         # Test writes on Readonly export
-        sleep(3)
-        _, rc = clients[0].exec_command(
-            sudo=True, cmd=f"touch {nfs_readonly_mount}/file_ro", check_ec=False
+        out, err, exit_code, _ = clients[0].exec_command(
+            sudo=True,
+            cmd=f"touch {nfs_readonly_mount}/file_ro",
+            check_ec=False,
+            verbose=True,
         )
-        # Ignore the "Read-only file system" error and consider it as a successful execution
-        if "touch: cannot touch" in str(rc) and "Read-only file system" in str(rc):
+        # exec_command returns (stdout, stderr); touch errors go to stderr
+        touch_output = f"{out or ''}{err or ''}"
+        if exit_code != 0 and (
+            "touch: cannot touch" in touch_output
+            or "Read-only file system" in touch_output
+        ):
             log.info("As expected, failed to create file on RO export")
         else:
-            log.error("Created file on RO export")
+            log.error(
+                "Unexpected touch result on RO export: exit=%s out=%r err=%r",
+                exit_code,
+                out,
+                err,
+            )
             return 1
 
         # Test writes on RW export
-        if clients[0].exec_command(sudo=True, cmd=f"touch {nfs_mount}/file_rw"):
+        _, _, rw_exit_code, _ = clients[0].exec_command(
+            sudo=True,
+            cmd=f"touch {nfs_mount}/file_rw",
+            check_ec=False,
+            verbose=True,
+        )
+        if rw_exit_code == 0:
             log.info("Successfully created file on RW export")
         else:
             log.error("failed to create file on RW export")
