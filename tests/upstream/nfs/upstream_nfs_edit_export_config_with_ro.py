@@ -27,7 +27,12 @@ def update_export_conf(installer, nfs_export_readonly, new_access_type
             installer.exec_command(sudo=True, cmd=cmd)
 
         ganesha_conf_file = "/etc/ganesha/ganesha.conf"
-        update_cmd = f"""sed -i '/Pseudo = "\{nfs_export_readonly}"/,/FSAL/{{s/Access_Type = .*;/Access_Type = {new_access_type};/}}' {ganesha_conf_file}"""
+        pseudo_escaped = nfs_export_readonly.replace("/", r"\/")
+        update_cmd = (
+            f"sed -i '/Pseudo = \"{pseudo_escaped}\"/,/FSAL/{{"
+            f"s/Access_Type = .*;/Access_Type = {new_access_type};/}}' "
+            f"{ganesha_conf_file}"
+        )
         installer.exec_command(
             sudo=True,
             cmd=update_cmd,

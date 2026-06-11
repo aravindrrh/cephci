@@ -1,49 +1,13 @@
 from time import sleep
 
-from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster
+from upstream_nfs_edit_export_config_with_ro import update_export_conf
+from upstream_nfs_operations import cleanup_cluster, create_export, setup_nfs_cluster
 
-from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
 from cli.utilities.filesys import Mount, Unmount
 from utility.log import Log
 
 log = Log(__name__)
-
-
-def update_export_access_type(installer, nfs_export_pseudo, access_type):
-    """Set Access_Type on an export block and restart upstream Ganesha."""
-    pid = ""
-    try:
-        out = installer.exec_command(sudo=True, cmd="pgrep ganesha")
-        pid = out[0].strip()
-    except Exception:
-        pass
-
-    if pid:
-        installer.exec_command(sudo=True, cmd=f"kill -9 {pid}")
-
-    ganesha_conf_file = "/etc/ganesha/ganesha.conf"
-    pseudo_escaped = nfs_export_pseudo.replace("/", r"\/")
-    # export.create ignores readonly=True and always appends Access_Type = RW.
-    update_cmd = (
-        f"sed -i '/Pseudo = \"{pseudo_escaped}\"/,/FSAL/{{"
-        f"s/Access_Type = .*;/Access_Type = {access_type};/}}' "
-        f"{ganesha_conf_file}"
-    )
-    installer.exec_command(sudo=True, cmd=update_cmd)
-    out = installer.exec_command(sudo=True, cmd=f"cat {ganesha_conf_file}")
-    log.info("ganesha.conf after Access_Type sed:\n%s", out[0])
-    installer.exec_command(
-        sudo=True,
-        cmd=(
-            "nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf "
-            "-L /var/log/ganesha.log"
-        ),
-    )
-    out = installer.exec_command(sudo=True, cmd="pgrep ganesha")
-    if not out[0].strip():
-        raise OperationFailedError("Failed to restart nfs service")
-    sleep(15)
 
 
 def run(ceph_cluster, **kw):
@@ -73,9 +37,9 @@ def run(ceph_cluster, **kw):
         raise ConfigError("The test requires more clients than available")
 
     clients = clients[:no_clients]  # Select only the required number of clients
+    installer = ceph_cluster.get_nodes("installer")[0]
 
     try:
-        # Setup nfs cluster
         setup_nfs_cluster(
             clients,
             nfs_server_name,
@@ -89,19 +53,12 @@ def run(ceph_cluster, **kw):
             ceph_cluster=ceph_cluster,
         )
 
-        # Create export; readonly=True is ignored by export.create — sed RO below.
-        installer = ceph_cluster.get_nodes("installer")[0]
-        Ceph(clients[0]).nfs.export.create(
-            fs_name=fs_name,
-            nfs_name=nfs_name,
-            nfs_export=nfs_export_readonly,
-            fs=fs_name,
-            readonly=True,
-            installer=installer,
-        )
-        update_export_access_type(installer, nfs_export_readonly, "RO")
+        # Same path as upstream_nfs_edit_export_config_with_ro (export.create
+        # ignores readonly=True and always writes Access_Type = RW).
+        create_export(installer, nfs_export_readonly)
+        log.info("Setting Access_Type = RO on %s", nfs_export_readonly)
+        update_export_conf(installer, nfs_export_readonly, "RO")
 
-        # Mount the readonly volume on client
         clients[0].create_dirs(dir_path=nfs_readonly_mount, sudo=True)
         if Mount(clients[0]).nfs(
             mount=nfs_readonly_mount,
@@ -114,7 +71,7 @@ def run(ceph_cluster, **kw):
             return 1
         log.info("Mount succeeded on client")
 
-        # Test writes on Readonly export
+        sleep(3)
         out, err, exit_code, _ = clients[0].exec_command(
             sudo=True,
             cmd=f"touch {nfs_readonly_mount}/file_ro",
@@ -137,7 +94,6 @@ def run(ceph_cluster, **kw):
             )
             return 1
 
-        # Test writes on RW export
         _, _, rw_exit_code, _ = clients[0].exec_command(
             sudo=True,
             cmd=f"touch {nfs_mount}/file_rw",
@@ -153,7 +109,6 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        # Cleaning up the Readonly export and mount dir
         log.info("Unmounting nfs-ganesha readonly mount on client:")
         if Unmount(clients[0]).unmount(nfs_readonly_mount):
             raise OperationFailedError(
@@ -161,9 +116,6 @@ def run(ceph_cluster, **kw):
             )
         log.info("Removing nfs-ganesha readonly mount dir on client:")
         clients[0].exec_command(sudo=True, cmd=f"rm -rf  {nfs_readonly_mount}")
-        # Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_readonly)
-
-        # Cleaning up the remaining export and deleting the nfs cluster
         cleanup_cluster(clients[0], nfs_mount, nfs_name, nfs_export)
         log.info("Cleaning up successfull")
     return 0
