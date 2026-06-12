@@ -1,0 +1,41 @@
+#===============================================================================================
+# Spectrum Scale — SPECstorage only (SWBUILD).
+#
+# Conf: conf/spectrum_scale/spectrum_scale_2node.yaml (installer + 2 clients)
+#
+# Deploy Scale / NFS once, then run SPECstorage SWBUILD on the shared export.
+#===============================================================================================
+tests:
+
+  - test:
+      name: Spectrum Scale multi-node deploy
+      module: upstream_nfs_deploy.py
+      desc: Deploy Scale / NFS once for SPECstorage
+      abort-on-fail: true
+      timeout: 14400
+      config:
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: SPECstorage
+      module: upstream_nfs_spec_storage.py
+      desc: SPECstorage SWBUILD on Scale-backed NFS
+      abort-on-fail: false
+      timeout: 21600
+      config:
+        skip_deployment: true
+        clients: 2
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume
+        nfs_version: "4.1"
+        benchmark: SWBUILD
+        load: 1
+        incr_load: 1
+        num_runs: 1
+        benchmark_defination:
+          Warmup_time: 30
+          Dir_count: 15
+          Files_per_dir: 30
+          File_size: 3k
+          Instances: 4

@@ -18,7 +18,14 @@ log = Log(__name__)
 
 
 def generate_test_case(
-    name, duration, status, err_type=None, err_msg=None, err_text=None, polarion_id=None
+    name,
+    duration,
+    status,
+    err_type=None,
+    err_msg=None,
+    err_text=None,
+    polarion_id=None,
+    comments=None,
 ):
     """Create test case object.
 
@@ -27,6 +34,7 @@ def generate_test_case(
         duration: test run duration
         status: test status
         polarion_id: polarion Id (default: None)
+        comments: known issues or notes from suite YAML (default: None)
 
     Returns:
         test_case: junit parser test case object
@@ -47,9 +55,12 @@ def generate_test_case(
         _result.text = err_text
         test_case.result = [_result]
 
+    props = Properties()
     if polarion_id:
-        props = Properties()
         props.append(Property(name="polarion-testcase-id", value=polarion_id))
+    if comments and str(comments).strip():
+        props.append(Property(name="comments", value=str(comments).strip()))
+    if props:
         test_case.append(props)
 
     return test_case
@@ -112,6 +123,7 @@ def create_xunit_results(suite_name, test_cases, test_run_metadata):
         err_type = tc.get("err_type")
         err_msg = tc.get("err_msg")
         err_text = tc.get("err_text")
+        comments = tc.get("comments")
 
         if pol_ids:
             _ids = pol_ids.split(",")
@@ -125,6 +137,7 @@ def create_xunit_results(suite_name, test_cases, test_run_metadata):
                         err_msg=err_msg,
                         err_text=err_text,
                         polarion_id=_id,
+                        comments=comments,
                     )
                 )
         else:
@@ -136,6 +149,7 @@ def create_xunit_results(suite_name, test_cases, test_run_metadata):
                     err_type=err_type,
                     err_msg=err_msg,
                     err_text=err_text,
+                    comments=comments,
                 )
             )
 

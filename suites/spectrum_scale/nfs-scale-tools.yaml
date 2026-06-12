@@ -23,6 +23,17 @@ tests:
         nfs_export: /ibm/scale_volume
 
   - test:
+      name: Lock test
+      module: upstream_nfs_lock_test.py
+      desc: nfstest_lock on Scale export
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
       name: Cthon
       module: upstream_nfs_cthon.py
       desc: Cthon tests on Scale-backed NFS
@@ -50,17 +61,6 @@ tests:
       desc: LTP on NFSv3 (client1) and NFSv4 (client2)
       abort-on-fail: false
       timeout: 21600
-      config:
-        skip_deployment: true
-        clients: 2
-        nfs_export: /ibm/scale_volume
-
-  - test:
-      name: Lock test
-      module: upstream_nfs_lock_test.py
-      desc: nfstest_lock on Scale export
-      abort-on-fail: false
-      timeout: 14400
       config:
         skip_deployment: true
         clients: 2
@@ -117,17 +117,6 @@ tests:
           Instances: 4
 
   - test:
-      name: PJDFS
-      module: upstream_nfs_pjdfs.py
-      desc: pjdfstest on NFSv3 and NFSv4 mounts
-      abort-on-fail: false
-      timeout: 14400
-      config:
-        skip_deployment: true
-        clients: 2
-        nfs_export: /ibm/scale_volume
-
-  - test:
       name: Pynfs
       module: upstream_nfs_pynfs.py
       desc: Pynfs client tests on Scale-backed NFS
@@ -142,6 +131,17 @@ tests:
       name: MDTest
       module: upstream_nfs_mdtest.py
       desc: mdtest on NFSv3 and NFSv4 mounts
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume
+
+  - test:
+      name: PJDFS
+      module: upstream_nfs_pjdfs.py
+      desc: pjdfstest on NFSv3 and NFSv4 mounts
       abort-on-fail: false
       timeout: 14400
       config:

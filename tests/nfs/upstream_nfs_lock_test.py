@@ -15,29 +15,109 @@ log = Log(__name__)
 NFSTEST_REPO = "git://git.linux-nfs.org/projects/mora/nfstest.git"
 NFSTEST_DIR = "/root/nfstest"
 LOCK_MOUNT_POINTS = ("/mnt/nfsv3", "/mnt/nfsv4")
-_DEBUG_LOG = "/Users/arunravi/work/cephci/.cursor/debug-085da4.log"
+_DEBUG_LOG = "/Users/arunravi/work/cephci/.cursor/debug-2e295e.log"
 
 
 def _agent_debug_log(hypothesis_id, location, message, data):
     # #region agent log
+    payload = {
+        "sessionId": "2e295e",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
     try:
         with open(_DEBUG_LOG, "a", encoding="utf-8") as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "sessionId": "085da4",
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
+            fh.write(json.dumps(payload) + "\n")
     except OSError:
         pass
+    log.info("agent-debug %s: %s %s", hypothesis_id, message, data)
     # #endregion
+
+
+def _remote_diag(node, cmd):
+    """Run a diagnostic command; never fail the test on errors."""
+    try:
+        out, _ = node.exec_command(cmd=cmd, sudo=True, check_ec=False)
+        return (out or "").strip()
+    except Exception as exc:
+        return f"<error: {exc}>"
+
+
+def _preflight_gpfs_lock_diagnostics(server, clients, export):
+    """
+    Collect GPFS lock + NLM state before nfstest_lock.
+
+    Hypotheses:
+      H1 - maxFcntlRangesPerFile too low -> ENOLCK under heavy lock churn
+      H2 - kernel lockd vs Ganesha NLM conflict on protocol node
+      H3 - NFS mounts on Ganesha server break NFSv3 byte-range locking
+      H5 - client-side rpcbind / lockd misconfiguration
+    """
+    client = clients[0]
+    server_ip = server.ip_address
+    diag = {
+        "server": server_ip,
+        "export": export,
+        "max_fcntl_ranges": _remote_diag(
+            server,
+            "mmfsadm dump config 2>/dev/null | grep -i maxFcntlRangesPerFile || "
+            "mmchconfig show 2>/dev/null | grep -i maxFcntlRangesPerFile || "
+            "echo unavailable",
+        ),
+        "server_nlm_rpcinfo": _remote_diag(
+            server, "rpcinfo -p 2>/dev/null | grep -E 'nlockmgr|100021' || true"
+        ),
+        "server_nfs_mounts": _remote_diag(
+            server, "mount -t nfs,nfs4 2>/dev/null || true"
+        ),
+        "client_nlm_rpcinfo": _remote_diag(
+            client, "rpcinfo -p 2>/dev/null | grep -E 'nlockmgr|100021' || true"
+        ),
+        "client_nfs_mounts": _remote_diag(
+            client, "mount -t nfs,nfs4 2>/dev/null || true"
+        ),
+    }
+    log.info("Lock test preflight diagnostics: %s", json.dumps(diag, indent=2))
+    _agent_debug_log(
+        "H1-H5",
+        "upstream_nfs_lock_test.py:_preflight_gpfs_lock_diagnostics",
+        "preflight lock diagnostics",
+        diag,
+    )
+    return diag
+
+
+def _analyze_nfstest_failures(client, run_log):
+    """Summarize failure patterns from nfstest_lock output (hypothesis H3/H4)."""
+    stats = {}
+    for label, cmd in (
+        ("fail_lines", f"grep -c '^    FAIL:' {run_log} 2>/dev/null || echo 0"),
+        ("enolck_count", f"grep -c 'No locks available' {run_log} 2>/dev/null || echo 0"),
+        (
+            "block_fail_count",
+            f"grep -c 'lock did not block' {run_log} 2>/dev/null || echo 0",
+        ),
+        (
+            "summary_line",
+            f"grep -E '^[0-9]+ tests \\(' {run_log} 2>/dev/null | tail -1",
+        ),
+        (
+            "first_fails",
+            f"grep '^    FAIL:' {run_log} 2>/dev/null | head -5",
+        ),
+    ):
+        stats[label] = _remote_diag(client, cmd)
+    log.info("nfstest_lock failure analysis: %s", json.dumps(stats, indent=2))
+    _agent_debug_log(
+        "H3-H4",
+        "upstream_nfs_lock_test.py:_analyze_nfstest_failures",
+        "nfstest failure pattern analysis",
+        stats,
+    )
+    return stats
 
 
 def _nfstest_run_log_path(nfs_version):
@@ -90,6 +170,9 @@ def _log_nfstest_failure(client, nfs_version, exit_code, run_log=""):
         tail,
         run_tail,
     )
+    fail_stats = {}
+    if run_log:
+        fail_stats = _analyze_nfstest_failures(client, run_log)
     _agent_debug_log(
         "H-LOCK",
         "upstream_nfs_lock_test.py:_log_nfstest_failure",
@@ -99,6 +182,7 @@ def _log_nfstest_failure(client, nfs_version, exit_code, run_log=""):
             "exit_code": exit_code,
             "log_path": log_path,
             "summary": (summary or "").strip(),
+            "fail_stats": fail_stats,
         },
     )
 
@@ -206,6 +290,8 @@ def run(ceph_cluster, **kw):
 
         log.info(">>> Verifying nfstest_lock exists...")
         client.exec_command(cmd=f"ls {nfstest_lock}", sudo=True)
+
+        _preflight_gpfs_lock_diagnostics(server, clients, export)
 
         for nfs_version in ("3", "4", "4.1"):
             log.info(">>> Running nfstest_lock sanity test for V%s", nfs_version)
