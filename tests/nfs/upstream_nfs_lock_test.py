@@ -40,11 +40,18 @@ def _agent_debug_log(hypothesis_id, location, message, data):
     # #endregion
 
 
-def _log_nfstest_failure(client, nfs_version, exit_code, stdout, stderr):
+def _nfstest_run_log_path(nfs_version):
+    """Per-version redirect path so nfstest_lock stdout stays off the Jenkins console."""
+    ver = nfs_version.replace(".", "_")
+    return f"/tmp/nfstest_lock_run_v{ver}.log"
+
+
+def _log_nfstest_failure(client, nfs_version, exit_code, run_log=""):
     """Pull nfstest_lock log tail into cephci logs for post-mortem analysis."""
     log_path = ""
     tail = ""
     summary = ""
+    run_tail = ""
     try:
         log_path, _ = client.exec_command(
             cmd="ls -t /tmp/nfstest_lock_*.log 2>/dev/null | head -1",
@@ -63,18 +70,25 @@ def _log_nfstest_failure(client, nfs_version, exit_code, stdout, stderr):
                 sudo=True,
                 check_ec=False,
             )
+        if run_log:
+            run_tail, _ = client.exec_command(
+                cmd=f"tail -80 {run_log}",
+                sudo=True,
+                check_ec=False,
+            )
     except Exception as exc:
         log.warning("Could not read nfstest_lock log on %s: %s", client.hostname, exc)
 
     log.error(
-        "nfstest_lock V%s failed (exit=%s) log=%s summary=%s stdout=%r stderr=%r tail:\n%s",
+        "nfstest_lock V%s failed (exit=%s) log=%s summary=%s run_log=%s "
+        "createlog tail:\n%s\nrun_log tail:\n%s",
         nfs_version,
         exit_code,
         log_path,
         (summary or "").strip(),
-        (stdout or "")[:500],
-        (stderr or "")[:500],
+        run_log,
         tail,
+        run_tail,
     )
     _agent_debug_log(
         "H-LOCK",
@@ -195,21 +209,27 @@ def run(ceph_cluster, **kw):
 
         for nfs_version in ("3", "4", "4.1"):
             log.info(">>> Running nfstest_lock sanity test for V%s", nfs_version)
+            run_log = _nfstest_run_log_path(nfs_version)
+            # Redirect stdout/stderr to a file on the client — nfstest_lock DBG3
+            # polling can emit millions of lines and must not stream to Jenkins.
             test_cmd = (
-                f"PYTHONPATH={NFSTEST_DIR} {nfstest_lock} "
+                f"bash -lc 'PYTHONPATH={NFSTEST_DIR} {nfstest_lock} "
                 f"--server {server.ip_address} --export {export} "
-                f"--nfsversion {nfs_version} --createlog"
+                f"--nfsversion {nfs_version} --createlog "
+                f">{run_log} 2>&1'"
             )
-            out, err, exit_code, _duration = client.exec_command(
-                cmd=test_cmd, sudo=True, timeout=7200, verbose=True
+            exit_code = client.exec_command(
+                cmd=test_cmd,
+                sudo=True,
+                long_running=True,
+                timeout=7200,
+                check_ec=False,
             )
-            log.info(out)
-            log.info(err)
             if exit_code != 0:
-                _log_nfstest_failure(client, nfs_version, exit_code, out, err)
+                _log_nfstest_failure(client, nfs_version, exit_code, run_log)
                 raise OperationFailedError(
                     f"nfstest_lock V{nfs_version} failed with exit {exit_code} "
-                    f"on {client.ip_address}"
+                    f"on {client.ip_address} (see {run_log} on client)"
                 )
 
         log.info("NFS locking test completed successfully.")
