@@ -83,7 +83,7 @@ tests:
       config:
         command: add
         id: client.1
-        node: node6
+        node: node4
         install_packages:
           - ceph-common
           - ceph-fuse
@@ -98,7 +98,7 @@ tests:
       config:
         command: add
         id: client.2
-        node: node7
+        node: node5
         install_packages:
           - ceph-common
           - ceph-fuse
@@ -113,7 +113,7 @@ tests:
       config:
         command: add
         id: client.3
-        node: node8
+        node: node6
         install_packages:
           - ceph-common
           - ceph-fuse
@@ -128,7 +128,7 @@ tests:
       config:
         command: add
         id: client.4
-        node: node9
+        node: node7
         install_packages:
           - ceph-common
           - ceph-fuse
