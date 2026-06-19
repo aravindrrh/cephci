@@ -35,9 +35,10 @@ ioengine=libaio
 direct=1
 runtime=60
 time_based
-size=1G
+size=100M
 directory=/mnt/nfsv3
 group_reporting
+numjobs=10
 
 [seqwrite]
 rw=write
@@ -70,9 +71,10 @@ ioengine=libaio
 direct=1
 runtime=60
 time_based
-size=1G
+size=100M
 directory=/mnt/nfsv4
 group_reporting
+numjobs=10
 
 [seqwrite]
 rw=write
