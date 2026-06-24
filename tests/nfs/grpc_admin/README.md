@@ -1,65 +1,121 @@
-# NFS-Ganesha gRPC Admin Tests
+# NFS-Ganesha gRPC API Tests
 
-Management-plane automation for the **D-Bus → gRPC migration** in NFS-Ganesha
-on **CephFS (cephadm NFS) only**.
+gRPC **interface** automation for NFS-Ganesha on **CephFS (cephadm NFS)**.
 
-This folder is separate from:
-- IBM Cloud basic gRPC smoke — `test_nfs_grpc.py` / `tier1-nfs-ganesha-grpc.yaml`
-- GPFS / IBM Storage Scale — tracked on the `nfs_upstream` fork, not here
+This folder validates that Ganesha gRPC APIs work as expected. It does **not**:
+
+- Re-run NFS protocol regression (cthon, pynfs, locks, POSIX, scale) — those
+  stay in existing NFS suites
+- Assert D-Bus vs gRPC parity — D-Bus is still the cephadm management path
+- Cover cephadm switching to gRPC — that is a later release
 
 ## Scope
 
 **FSAL:** CephFS only (`ceph nfs cluster`, cephadm NFS service).
 
-| In scope (this folder) | Out of scope |
-|------------------------|--------------|
-| ExportMgr, Admin, ClientMgr, Log (single-node) | GPFS / IBM Storage Scale (`nfs_upstream`) |
-| D-Bus vs gRPC parity (golden JSON) | Inter-node HA / grace inject (parked) |
-| Local transport (TCP, UDS) | Network partition / VIP failover (parked) |
-| mTLS / auth negative (single node) | `baremetal/tier1-nfs-ganesha-grpc-ha.yaml` (future) |
-| Ceph NFS scale / tier0 / tier1 regression gates | `test_grpc_ganesha_ha_inject.py` (parked) |
+| In scope | Out of scope (for now) |
+|----------|------------------------|
+| ExportService, ExportStats | GPFS / IBM Storage Scale (`nfs_upstream`) |
+| ClientMgr, ClientStats | D-Bus parity / golden compare |
+| nfsAdmin, ShowIdMapper | Inter-node HA / grace inject |
+| Core nfsService (grace, client/session IDs) | LogService (no upstream proto yet) |
+| Transport: TCP, UDS, mTLS, negatives | Cephadm consuming gRPC for export mgmt |
+
+## Suites
+
+| Suite | Purpose |
+|-------|---------|
+| `suites/tentacle/nfs/tier1-nfs-ganesha-grpc.yaml` | Core `nfsService` smoke (port, discovery, grace, IDs) |
+| `suites/tentacle/nfs/tier1-nfs-ganesha-grpc-admin.yaml` | Full gRPC API suite (export/client/admin/stats + security) |
+| `suites/tentacle/nfs/tier1-nfs-ganesha-grpc-perf.yaml` | RPC latency + image build / proto compile |
+
+**Removed:** `tier0-nfs-ganesha-grpc-regression.yaml` (cthon/pynfs/locks/POSIX/tier gates/scale).
 
 ## Related artifacts
 
-- **Admin suite:** `suites/tentacle/nfs/tier1-nfs-ganesha-grpc-admin.yaml`
-- **Regression suite:** `suites/tentacle/nfs/tier0-nfs-ganesha-grpc-regression.yaml`
-- **Perf / build suite:** `suites/tentacle/nfs/tier1-nfs-ganesha-grpc-perf.yaml`
-- **IBM Cloud smoke (unchanged):** `suites/tentacle/nfs/tier1-nfs-ganesha-grpc.yaml`
-- **Proto definitions:** https://github.com/ffilz/nfs-ganesha/tree/next/src/grpc_server/proto
-- **Feature doc:** gRPC Replacement for D-Bus (project doc)
-- **Test plan:** NFS-Ganesha gRPC Migration — Test Strategy v1.1
+- **Proto definitions:** https://github.com/nfs-ganesha/nfs-ganesha/tree/next/src/grpc_server/proto
+- **Polarion mapping:** [`POLARION.md`](POLARION.md)
 
 ## Module map
 
-| File | Purpose | Test plan IDs |
-|------|---------|---------------|
-| `grpc_client.py` | grpcurl install, plaintext/TLS calls, service list | — |
-| `grpc_deploy.py` | NFS container image override (`container_image_nfs`) | — |
-| `test_grpc_ganesha_admin.py` | P0 admin matrix (`operation` config key) | GRPC-EXP-*, GRPC-CLT-*, GRPC-ADM-*, GRPC-LOG-* |
-| `test_grpc_ganesha_parity.py` | Capture/compare D-Bus vs gRPC responses | GRPC-EXP-007/008, parity matrix |
-| `test_grpc_ganesha_security_negative.py` | UDS, bad cert, invalid RPC, timeout | GRPC-LOC-*, GRPC-SEC-* |
-| `test_grpc_ganesha_load_negative.py` | Concurrent grpcurl load / exhaustion | GRPC-SEC-* |
-| `test_grpc_ganesha_perf.py` | Admin RPC latency under load | perf matrix |
-| `test_grpc_ganesha_build.py` | USE_GRPC build, dual-stack, proto compile | build matrix |
-| `test_grpc_ganesha_deploy.py` | NFS image override + bootstrap gRPC smoke | deploy gate |
-| `test_grpc_pjdfstest.py` | pjdfstest POSIX smoke on NFS mount | regression |
-| `test_grpc_ganesha_regression_gate.py` | Tier0/tier1 representative smoke | regression gates |
-| `test_grpc_ganesha_stub.py` | Skipped Polarion placeholders (rc=-1) | Parked HA IDs only |
+| File | Purpose |
+|------|---------|
+| `grpc_client.py` | grpcurl helpers for all proto services |
+| `grpc_deploy.py` | NFS container image override + optional cert copy |
+| `test_grpc_ganesha_admin.py` | gRPC API operations (`operation` config key) |
+| `test_grpc_ganesha_security_negative.py` | Transport / mTLS / invalid RPC / timeout |
+| `test_grpc_ganesha_load_negative.py` | Concurrent grpcurl load |
+| `test_grpc_ganesha_perf.py` | Admin / ShowClients / export RPC latency |
+| `test_grpc_ganesha_build.py` | USE_GRPC image + proto compile smoke |
+| `test_grpc_ganesha_deploy.py` | Image override + bootstrap smoke |
+| `test_grpc_ganesha_parity.py` | Deferred D-Bus parity (not scheduled) |
+| `test_grpc_ganesha_stub.py` | Parked HA Polarion placeholders (not scheduled) |
+| `test_grpc_ganesha_regression_gate.py` | Legacy tier gates (not scheduled) |
+| `test_grpc_pjdfstest.py` | POSIX smoke (not scheduled in gRPC suites) |
 
 ## CephCI module naming
-
-Suite YAML references modules as:
 
 ```
 module: grpc_admin.test_grpc_ganesha_admin.py
 ```
 
 `tests/nfs` is on `sys.path`; the folder uses an underscore (`grpc_admin`) because
-hyphens are not valid in Python import paths (same pattern as `acl.test_nfs_acl_functional.py`).
+hyphens are not valid in Python import paths.
+
+## Upstream gRPC services (nfs-ganesha `next`)
+
+| Package | Service | Key RPCs |
+|---------|---------|----------|
+| `nfsService` | `GetClientId` | `GetClientIds` |
+| `nfsService` | `GetNfsGrace` | `GetGracePeriod` |
+| `nfsService` | `StartNfsGrace` | `StartGraceWithEvent` |
+| `nfsService` | `GetSessionId` | `GetSessionIds` |
+| `nfsService` | `nfsAdmin` | `ShutdownGanesha`, `ReReadConfig`, Purge*, Trim*, … |
+| `nfsService` | `ShowIdMapperService` | `ShowIdMapper` |
+| `exportService` | `ExportService` | `ShowExports`, `DisplayExport`, `AddExport`, `RemoveExport`, `UpdateExport` |
+| `exportService` | `ExportStats` | `GetNFSv*IO`, `GetNFSIO`, `StatusStats`, `ResetStats`, … |
+| `cltmgrService` | `ClientMgr` | `ShowClients`, `AddClient`, `RemoveClient`, `DisconnectNfsv41Client` |
+| `cltmgrService` | `ClientStats` | `GetNFSv*IO`, `GetDelegations`, `GetClientAllops`, … |
+
+**Not in proto yet:** Log get/set (D-Bus log interface only).
+
+## Admin module operations
+
+| `operation` | gRPC call |
+|-------------|-----------|
+| `verify_port` | Port 50051 listen check |
+| `list_services` | `grpcurl list` |
+| `get_grace_period` | `GetNfsGrace/GetGracePeriod` |
+| `start_grace_event_0\|2\|4\|5` | `StartNfsGrace/StartGraceWithEvent` |
+| `show_clients_and_sessions` | `GetClientIds` + `GetSessionIds` |
+| `show_exports` | `ExportService/ShowExports` |
+| `display_export` | `ExportService/DisplayExport` |
+| `add_export` | `ExportService/AddExport` |
+| `remove_export` | `ExportService/RemoveExport` |
+| `update_export` | `ExportService/UpdateExport` (flips Access_Type) |
+| `show_clients_mgr` | `ClientMgr/ShowClients` |
+| `add_client` / `remove_client` | `ClientMgr/AddClient` / `RemoveClient` |
+| `disconnect_nfsv41_client` | `ClientMgr/DisconnectNfsv41Client` |
+| `reread_config` | `nfsAdmin/ReReadConfig` |
+| `purge_gids` | `nfsAdmin/PurgeGids` |
+| `purge_netgroups` | `nfsAdmin/PurgeNetGroups` |
+| `init_fd_limit` | `nfsAdmin/InitFdLimit` |
+| `purge_idmapper_cache` | `nfsAdmin/PurgeIdmapperCache` |
+| `purge_idmapper_negative_cache` | `nfsAdmin/PurgeIdmapperNegativeCache` |
+| `malloc_trace` / `malloc_untrace` | `nfsAdmin/MallocTrace` / `MallocUntrace` |
+| `trim_enable` / `trim_disable` | `nfsAdmin/TrimEnableDisable` |
+| `trim_call` | `nfsAdmin/TrimCall` |
+| `trim_status` | `nfsAdmin/TrimStatus` |
+| `show_idmapper` | `ShowIdMapperService/ShowIdMapper` |
+| `export_stats_smoke` | `ExportStats` smoke (StatusStats / GetNFSv41IO / GetNFSIO) |
+| `client_stats_smoke` | `ClientStats.GetNFSv41IO` smoke |
+| `shutdown` | `nfsAdmin/ShutdownGanesha` — **not scheduled** (opt-in only) |
+
+Blocked (no upstream proto): `set_log_level`, `get_log_level`.
+
+**Deferred:** full ExportStats / ClientStats RPC matrix (beyond smoke).
 
 ## gRPC configuration defaults
-
-From the feature design doc (ganesha.conf `GRPC` stanza):
 
 | Parameter | Default |
 |-----------|---------|
@@ -73,99 +129,16 @@ From the feature design doc (ganesha.conf `GRPC` stanza):
 
 Build flag: `cmake -DUSE_GRPC=ON`
 
-Example grpcurl (TLS):
+Example grpcurl (plaintext):
 
 ```
-grpcurl -cacert ca.crt -cert client.crt -key client.key localhost:50051 list
+grpcurl -plaintext <nfs-ip>:50051 list
+grpcurl -plaintext <nfs-ip>:50051 exportService.ExportService/ShowExports
 ```
-
-## Proto status vs automation
-
-### Implemented today (`nfsService.proto`)
-
-- `GetClientId.GetClientIds`
-- `GetNfsGrace.GetGracePeriod`
-- `StartNfsGrace.StartGraceWithEvent`
-- `GetSessionId.GetSessionIds`
-
-### Planned (D-Bus replacement — tests stubbed until upstream merges)
-
-| D-Bus path | Proposed gRPC service |
-|------------|----------------------|
-| `/org/ganesha/nfsd/ClientMgr` | ClientMgrService |
-| `/org/ganesha/nfsd/ExportMgr` | ExportMgrService |
-| `/org/ganesha/nfsd/admin` | AdminService, LogService |
-
-## D-Bus to gRPC service mapping (target state)
-
-| D-Bus path | Interfaces | gRPC service (proposed) | Primary CephCI hook |
-|------------|------------|-------------------------|---------------------|
-| `/org/ganesha/nfsd/ClientMgr` | clientmgr, clientstats | ClientMgrService | `test_grpc_ganesha_admin.py` |
-| `/org/ganesha/nfsd/ExportMgr` | exportmgr, exportstats | ExportMgrService | `test_grpc_ganesha_admin.py` |
-| `/org/ganesha/nfsd/admin` | admin, log | AdminService, LogService | `test_grpc_ganesha_admin.py` |
-
-## Migration phases
-
-| Phase | Build | CephCI behavior |
-|-------|-------|-----------------|
-| 0 – Baseline | USE_DBUS=ON | Capture D-Bus golden in `golden/` |
-| 1 – Shadow | Dual stack | Parity diff after tier0; read-only gRPC |
-| 2 – Dual write | Both paths | AddExport via gRPC during export tests |
-| 3 – gRPC primary | USE_GRPC=ON | Full admin suite |
-| 4 – D-Bus removed | gRPC only | Parity module retired |
-
-## Implementation phases (this repo)
-
-### M1 — Foundation
-
-- [x] `grpc_client.py` — shared helpers (extract from `test_nfs_grpc.py`)
-- [x] `test_grpc_ganesha_admin.py` — operations for **implemented** RPCs
-- [x] `tier1-nfs-ganesha-grpc-admin.yaml` — suite skeleton
-- [x] Polarion ID mapping for admin cases — see `POLARION.md`
-
-### M2 — Parity + security
-
-- [x] `test_grpc_ganesha_parity.py` + `golden/` baseline capture
-- [x] `test_grpc_ganesha_security_negative.py` — UDS, TLS, auth negatives
-
-### M3 — ExportMgr / Admin (blocked on proto)
-
-- [ ] Enable stubbed operations: add_export, remove_export, update_export, shutdown, reload, log_level
-- [ ] Wire to existing NFS export tests where possible
-
-### M4 — HA (parked)
-
-- [ ] `test_grpc_ganesha_ha_inject.py`
-- [ ] `baremetal/tier1-nfs-ganesha-grpc-ha.yaml`
-
-## Regression gates (existing suites — no new code)
-
-Run with gRPC-enabled NFS image:
-
-- `tier0-nfs-ganesha.yaml` / `tier1-nfs-ganesha.yaml`
-- `upstream_nfs_cthon.py`, `upstream_nfs_pynfs.py`, `upstream_nfs_multilock.py`
-
-## Polarion traceability
-
-**37 CephFS** migration Polarion cases are mapped in [`POLARION.md`](POLARION.md)
-(CEPH-83632459–CEPH-83632503, excluding three GPFS-only IDs).
-
-The suite `tier1-nfs-ganesha-grpc-admin.yaml` wires each Ceph ID to an automated,
-partial, or stub (skipped) test for `--post-results`.
-
-**GPFS-only Polarion IDs** (not in this repo): CEPH-83632481, CEPH-83632495,
-CEPH-83632498 — track on `nfs_upstream` fork.
-
-IBM Cloud basic gRPC smoke uses separate IDs (CEPH-83630609–616) in
-`tier1-nfs-ganesha-grpc.yaml`.
-
-**Note:** CEPH-83632499 is **CephCI NFS scale** (load/scale suites in this repo),
-not IBM Storage Scale.
 
 ## gRPC-enabled cephadm NFS image
 
-All gRPC suites expect a **gRPC-built** nfs-ganesha container. Override the
-default cephadm NFS image before the first `setup_nfs_cluster()` call:
+All gRPC suites expect a **gRPC-built** nfs-ganesha container:
 
 ```yaml
 config:
@@ -175,16 +148,37 @@ config:
 `test_grpc_ganesha_deploy.py` operation `set_nfs_image` applies
 `mgr/cephadm/container_image_nfs` via `grpc_deploy.apply_nfs_container_image()`.
 
-Without this image, regression and admin tests that need port 50051 will fail;
-proto-blocked operations still skip cleanly (rc=-1).
+## Temporary mTLS cert deploy
+
+Place TLS files on the **NFS node** before mTLS tests:
+
+```
+/root/certs/ca.crt
+/root/certs/server.crt
+/root/certs/server.key
+/root/certs/client.crt
+/root/certs/client.key
+```
+
+```yaml
+config:
+  deploy_grpc_certs: true
+  grpc_cert_source: /root/certs
+  restart_nfs_after_cert_copy: true
+```
+
+## Later release (not in these suites)
+
+- Cephadm manages exports/clients via gRPC instead of D-Bus
+- D-Bus removal / dual-write parity gates
+- HA / multi-node gRPC coordination
+- LogService once upstream lands a proto
 
 ## Open items
 
-- [x] Polarion IDs for all admin test cases
-- [x] `grpc_deploy.py` + suite `nfs_container_image` wiring
-- [x] Regression suite (`tier0-nfs-ganesha-grpc-regression.yaml`)
-- [x] Perf / build suite (`tier1-nfs-ganesha-grpc-perf.yaml`)
-- [ ] Published gRPC NFS container image tag for Jenkins (set per pipeline run)
-- [ ] ExportMgr/Admin proto merge timeline from nfs-ganesha upstream
-- [ ] Dual-stack policy for RHCS images (D-Bus + gRPC vs gRPC-only)
-- [ ] `baremetal/tier1-nfs-ganesha-grpc-ha.yaml` for 6 parked HA IDs
+- [ ] Published gRPC NFS container image tag for Jenkins
+- [ ] Harden `AddExport` / `UpdateExport` with real CEPH FSAL credentials from the live export
+  (configs are staged under the bind-mounted ``etc/ganesha`` path)
+- [ ] Optional `require_all_services: true` once the full-proto image is standard
+- [ ] Full ExportStats / ClientStats matrix (deferred)
+- [ ] `ShutdownGanesha` isolated job (intentionally skipped)

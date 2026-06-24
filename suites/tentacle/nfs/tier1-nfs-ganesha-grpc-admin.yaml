@@ -1,24 +1,18 @@
 #===============================================================================================
-#------------------------------------------
-#---  NFS Ganesha gRPC Admin Tests Suite ---
-#------------------------------------------
+#---  NFS Ganesha gRPC API Suite (CephFS) ---
+#===============================================================================================
 # Conf: conf/tentacle/nfs/1admin-7node-3client.yaml
 #
-# FSAL scope: CephFS only (cephadm NFS). GPFS / IBM Storage Scale is tracked
-# separately on the nfs_upstream fork — not in this suite.
+# gRPC-only interface validation. Does NOT run NFS protocol regression
+# (cthon/pynfs/locks/POSIX/scale) — those live in existing NFS suites.
+# D-Bus remains the cephadm management path until a later release; this suite
+# only asserts that Ganesha gRPC APIs work as expected.
 #
-# D-Bus → gRPC migration management-plane tests (single-node).
-# IBM Cloud basic gRPC smoke remains in tier1-nfs-ganesha-grpc.yaml.
+# Requires a gRPC-built NFS image — set nfs_container_image in Jenkins/config.
 #
 # Modules: tests/nfs/grpc_admin/
-#   - test_grpc_ganesha_admin.py
-#   - test_grpc_ganesha_parity.py
-#   - test_grpc_ganesha_security_negative.py
-#   - test_grpc_ganesha_load_negative.py
-#   - test_grpc_ganesha_deploy.py
-#
-# Regression / perf: tier0-nfs-ganesha-grpc-regression.yaml,
-#   tier1-nfs-ganesha-grpc-perf.yaml
+# Related smoke: tier1-nfs-ganesha-grpc.yaml (core nfsService RPCs)
+# Optional perf: tier1-nfs-ganesha-grpc-perf.yaml
 #===============================================================================================
 tests:
   - test:
@@ -61,7 +55,7 @@ tests:
               pos_args:
                 - cephfs
               service: mds
-      desc: Bootstrap and deploy Ceph services for NFS gRPC admin testing.
+      desc: Bootstrap and deploy Ceph services for NFS gRPC API testing.
       destroy-cluster: false
       module: test_cephadm.py
       name: Deploy cluster using cephadm
@@ -76,7 +70,7 @@ tests:
           - ceph-common
           - ceph-fuse
         copy_admin_keyring: true
-      desc: Configure client 1 for NFS gRPC admin testing
+      desc: Configure client 1 for NFS gRPC API testing
       destroy-cluster: false
       module: test_client.py
       name: configure client 1
@@ -91,13 +85,13 @@ tests:
           - ceph-common
           - ceph-fuse
         copy_admin_keyring: true
-      desc: Configure client 2 for NFS gRPC admin testing
+      desc: Configure client 2 for NFS gRPC API testing
       destroy-cluster: false
       module: test_client.py
       name: configure client 2
 
   - test:
-      name: gRPC Admin - Set NFS Container Image
+      name: gRPC API - Set NFS Container Image
       module: grpc_admin.test_grpc_ganesha_deploy.py
       desc: Override mgr/cephadm/container_image_nfs when nfs_container_image is set
       abort-on-fail: false
@@ -106,10 +100,10 @@ tests:
         # nfs_container_image: quay.io/rhceph/nfs-ganesha-grpc:<tag>
 
   # =============================================================================
-  # gRPC Admin — transport and implemented nfsService RPCs
+  # Transport / discovery
   # =============================================================================
   - test:
-      name: gRPC Admin - Verify Port 50051 Listening
+      name: gRPC API - Verify Port 50051 Listening
       module: grpc_admin.test_grpc_ganesha_admin.py
       desc: Verify gRPC admin port is listening on the NFS node
       abort-on-fail: false
@@ -123,13 +117,14 @@ tests:
         port: 2049
 
   - test:
-      name: gRPC Admin - List gRPC Services
+      name: gRPC API - List Services (API Contract)
       module: grpc_admin.test_grpc_ganesha_admin.py
-      desc: Verify nfsService gRPC services are discoverable via grpcurl
+      desc: Discover nfsService / exportService / cltmgrService via grpcurl
       polarion-id: CEPH-83632471
       abort-on-fail: false
       config:
         operation: list_services
+        require_all_services: false
         nfs_name: cephfs-nfs
         nfs_export: /export
         fs_name: cephfs
@@ -138,78 +133,7 @@ tests:
         port: 2049
 
   - test:
-      name: gRPC Admin - Get Grace Period
-      module: grpc_admin.test_grpc_ganesha_admin.py
-      desc: Call GetNfsGrace.GetGracePeriod and verify response
-      polarion-id: CEPH-83632468
-      abort-on-fail: false
-      config:
-        operation: get_grace_period
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        nfs_mount: /mnt/nfs
-        fs_name: cephfs
-        clients: 1
-        nfs_version: 4.1
-        port: 2049
-
-  - test:
-      name: gRPC Admin - Start Grace Period Event 0
-      module: grpc_admin.test_grpc_ganesha_admin.py
-      desc: Invoke StartNfsGrace.StartGraceWithEvent with Event ID 0
-      polarion-id: CEPH-83632468
-      abort-on-fail: false
-      config:
-        operation: start_grace_event_0
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        nfs_mount: /mnt/nfs
-        fs_name: cephfs
-        clients: 1
-        nfs_version: 4.1
-        port: 2049
-
-  - test:
-      name: gRPC Admin - Show Clients With Active Mounts
-      module: grpc_admin.test_grpc_ganesha_admin.py
-      desc: Mount on two clients and verify GetClientIds returns active clients
-      polarion-id: CEPH-83632475
-      abort-on-fail: false
-      config:
-        operation: show_clients_and_sessions
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        nfs_mount: /mnt/nfs
-        fs_name: cephfs
-        clients: 2
-        nfs_version: 4.1
-        port: 2049
-
-  # =============================================================================
-  # gRPC Admin — parity baseline (Phase 0)
-  # =============================================================================
-  - test:
-      name: gRPC Admin - Capture gRPC Parity Baseline
-      module: grpc_admin.test_grpc_ganesha_parity.py
-      desc: Capture gRPC admin RPC responses into golden/ for regression diff
-      polarion-id: CEPH-83632475,CEPH-83632476
-      abort-on-fail: false
-      config:
-        operation: capture_full_baseline
-        golden_name: grpc_admin_baseline
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        nfs_mount: /mnt/nfs
-        fs_name: cephfs
-        clients: 1
-        nfs_version: 4.1
-        port: 2049
-
-  # =============================================================================
-  # gRPC Admin — transport / security (single-node)
-  # =============================================================================
-  - test:
-      name: gRPC Admin - TCP Service Discovery
+      name: gRPC API - TCP Service Discovery
       module: grpc_admin.test_grpc_ganesha_security_negative.py
       desc: Verify grpcurl list over cluster IP (plaintext)
       polarion-id: CEPH-83632460
@@ -224,7 +148,7 @@ tests:
         port: 2049
 
   - test:
-      name: gRPC Admin - Loopback Service Discovery
+      name: gRPC API - Loopback Service Discovery
       module: grpc_admin.test_grpc_ganesha_security_negative.py
       desc: Verify grpcurl list via 127.0.0.1 on NFS node
       polarion-id: CEPH-83632460
@@ -239,72 +163,7 @@ tests:
         port: 2049
 
   - test:
-      name: gRPC Admin - Bad Port Connection Rejected
-      module: grpc_admin.test_grpc_ganesha_security_negative.py
-      desc: Verify gRPC connection to invalid port fails
-      polarion-id: CEPH-83632500
-      abort-on-fail: false
-      config:
-        operation: verify_bad_port_rejected
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        fs_name: cephfs
-        clients: 1
-        nfs_version: 4.1
-        port: 2049
-        bad_port: 50151
-
-  # =============================================================================
-  # gRPC Admin — blocked until ExportMgr/Admin/Log proto (skipped)
-  # =============================================================================
-  - test:
-      name: gRPC Admin - AddExport and NFS Mount (blocked)
-      module: grpc_admin.test_grpc_ganesha_admin.py
-      desc: ExportMgr.AddExport — skipped until upstream proto available
-      polarion-id: CEPH-83632461
-      abort-on-fail: false
-      config:
-        operation: add_export
-        blocked: true
-        skip_if_blocked: true
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        clients: 1
-
-  - test:
-      name: gRPC Admin - ShowExports D-Bus Parity (blocked)
-      module: grpc_admin.test_grpc_ganesha_admin.py
-      desc: ExportMgr.ShowExports — skipped until upstream proto available
-      polarion-id: CEPH-83632476
-      abort-on-fail: false
-      config:
-        operation: show_exports
-        blocked: true
-        skip_if_blocked: true
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        clients: 1
-
-  - test:
-      name: gRPC Admin - mTLS Required (blocked)
-      module: grpc_admin.test_grpc_ganesha_security_negative.py
-      desc: mTLS positive/negative — skipped until certs deployed in suite
-      polarion-id: CEPH-83632472
-      abort-on-fail: false
-      config:
-        operation: verify_tls_required
-        skip_if_blocked: true
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        clients: 1
-
-  # =============================================================================
-  # Transport extensions, negative tests, parity (proto-blocked ops skip)
-  # Regression / perf / build cases: see tier0-nfs-ganesha-grpc-regression.yaml
-  # and tier1-nfs-ganesha-grpc-perf.yaml
-  # =============================================================================
-  - test:
-      name: gRPC Admin - UDS Local Communication
+      name: gRPC API - UDS Local Communication
       module: grpc_admin.test_grpc_ganesha_security_negative.py
       desc: Verify gRPC discovery over Unix domain socket
       polarion-id: CEPH-83632459
@@ -320,65 +179,63 @@ tests:
         port: 2049
 
   - test:
-      name: gRPC Admin - Admin RPC Authorization
+      name: gRPC API - Bad Port Connection Rejected
       module: grpc_admin.test_grpc_ganesha_security_negative.py
-      desc: Admin RPC auth matrix — skipped until AdminService proto
+      desc: Verify gRPC connection to invalid port fails
+      polarion-id: CEPH-83632500
+      abort-on-fail: false
+      config:
+        operation: verify_bad_port_rejected
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+        bad_port: 50151
+
+  - test:
+      name: gRPC API - mTLS Required
+      module: grpc_admin.test_grpc_ganesha_security_negative.py
+      desc: mTLS positive/negative with certs from /root/certs on NFS node
+      polarion-id: CEPH-83632472
+      abort-on-fail: false
+      config:
+        operation: verify_tls_required
+        skip_if_blocked: false
+        deploy_grpc_certs: true
+        grpc_cert_source: /root/certs
+        restart_nfs_after_cert_copy: true
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - Admin RPC Authorization
+      module: grpc_admin.test_grpc_ganesha_security_negative.py
+      desc: nfsAdmin.ReReadConfig accepted with mTLS, rejected on plaintext
       polarion-id: CEPH-83632473
       abort-on-fail: false
       config:
         operation: verify_admin_auth_matrix
-        blocked: true
-        skip_if_blocked: true
+        skip_if_blocked: false
+        deploy_grpc_certs: true
+        grpc_cert_source: /root/certs
+        restart_nfs_after_cert_copy: true
+        admin_method: nfsService.nfsAdmin/ReReadConfig
         nfs_name: cephfs-nfs
         nfs_export: /export
         clients: 1
+        nfs_version: 4.1
+        port: 2049
 
   - test:
-      name: gRPC Admin - Admin API Parity
-      module: grpc_admin.test_grpc_ganesha_parity.py
-      desc: D-Bus admin vs gRPC AdminService — skipped until proto
-      polarion-id: CEPH-83632477
-      abort-on-fail: false
-      config:
-        operation: compare_admin_parity
-        blocked: true
-        skip_if_blocked: true
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        clients: 1
-
-  - test:
-      name: gRPC Admin - Log Management API Parity
-      module: grpc_admin.test_grpc_ganesha_parity.py
-      desc: LogService D-Bus vs gRPC parity — skipped until proto
-      polarion-id: CEPH-83632478
-      abort-on-fail: false
-      config:
-        operation: compare_log_parity
-        blocked: true
-        skip_if_blocked: true
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        clients: 1
-
-  - test:
-      name: gRPC Admin - Stats API Parity
-      module: grpc_admin.test_grpc_ganesha_parity.py
-      desc: StatsService D-Bus vs gRPC parity — skipped until proto
-      polarion-id: CEPH-83632479
-      abort-on-fail: false
-      config:
-        operation: compare_stats_parity
-        blocked: true
-        skip_if_blocked: true
-        nfs_name: cephfs-nfs
-        nfs_export: /export
-        clients: 1
-
-  - test:
-      name: gRPC Admin - Invalid RPC Request Handling
+      name: gRPC API - Invalid RPC Request Handling
       module: grpc_admin.test_grpc_ganesha_security_negative.py
-      desc: Malformed JSON / protobuf rejected by gRPC server
+      desc: Malformed JSON / missing fields rejected by gRPC server
       polarion-id: CEPH-83632501
       abort-on-fail: false
       config:
@@ -391,7 +248,7 @@ tests:
         port: 2049
 
   - test:
-      name: gRPC Admin - Resource Exhaustion Handling
+      name: gRPC API - Resource Exhaustion Handling
       module: grpc_admin.test_grpc_ganesha_load_negative.py
       desc: Concurrent grpcurl load — daemon stays responsive
       polarion-id: CEPH-83632502
@@ -408,7 +265,7 @@ tests:
         workers: 5
 
   - test:
-      name: gRPC Admin - Timeout Handling
+      name: gRPC API - Timeout Handling
       module: grpc_admin.test_grpc_ganesha_security_negative.py
       desc: Short client timeout on gRPC RPC
       polarion-id: CEPH-83632503
@@ -424,58 +281,452 @@ tests:
         max_time_sec: 0.001
 
   # =============================================================================
-  # Parked HA stubs — future baremetal/tier1-nfs-ganesha-grpc-ha.yaml
+  # nfsService — grace / client / session
   # =============================================================================
   - test:
-      name: "Polarion stub - Inter-Node Cluster Communication"
-      module: grpc_admin.test_grpc_ganesha_stub.py
-      desc: Verify gRPC Communication Between Cluster Nodes
-      polarion-id: CEPH-83632467
+      name: gRPC API - Get Grace Period
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: Call GetNfsGrace.GetGracePeriod and verify response
+      polarion-id: CEPH-83632468
       abort-on-fail: false
       config:
-        stub_reason: Parked — HA / multi-node suite
+        operation: get_grace_period
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
 
   - test:
-      name: "Polarion stub - Export Coordination Multi-Node"
-      module: grpc_admin.test_grpc_ganesha_stub.py
-      desc: Verify Export Coordination in Multi-Node Cluster
-      polarion-id: CEPH-83632469
+      name: gRPC API - Start Grace Period Event 0
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: Invoke StartNfsGrace.StartGraceWithEvent with Event ID 0
+      polarion-id: CEPH-83632468
       abort-on-fail: false
       config:
-        stub_reason: Parked — HA / multi-node suite
+        operation: start_grace_event_0
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
 
   - test:
-      name: "Polarion stub - TLS Inter-Node Encryption"
-      module: grpc_admin.test_grpc_ganesha_stub.py
-      desc: Verify TLS Encryption for Inter-Node Communication
-      polarion-id: CEPH-83632474
+      name: gRPC API - GetClientIds and GetSessionIds
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: Mount on two clients and verify client/session ID RPCs
+      polarion-id: CEPH-83632475
       abort-on-fail: false
       config:
-        stub_reason: Parked — cluster mTLS + packet capture
+        operation: show_clients_and_sessions
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 2
+        nfs_version: 4.1
+        port: 2049
+
+  # =============================================================================
+  # exportService.ExportService
+  # =============================================================================
+  - test:
+      name: gRPC API - ShowExports
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ExportService.ShowExports returns active exports
+      polarion-id: CEPH-83632476
+      abort-on-fail: false
+      config:
+        operation: show_exports
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
 
   - test:
-      name: "Polarion stub - CephFS HA Failover with gRPC"
-      module: grpc_admin.test_grpc_ganesha_stub.py
-      desc: Verify CephFS HA Failover with gRPC
-      polarion-id: CEPH-83632480
+      name: gRPC API - DisplayExport
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ExportService.DisplayExport for first export from ShowExports
+      polarion-id: CEPH-83632461
       abort-on-fail: false
       config:
-        stub_reason: Parked — baremetal/tier1-nfs-ganesha-grpc-ha
+        operation: display_export
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
 
   - test:
-      name: "Polarion stub - Export Edit During Active I/O"
-      module: grpc_admin.test_grpc_ganesha_stub.py
-      desc: Verify Export Edit During Active I/O
-      polarion-id: CEPH-83632482
+      name: gRPC API - AddExport
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ExportService.AddExport via config file on NFS node
+      polarion-id: CEPH-83632461
       abort-on-fail: false
       config:
-        stub_reason: Parked — HA export edit tests + gRPC UpdateExport
+        operation: add_export
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+        # Optional: export_config_content / fsal_user_id / fsal_secret_access_key
 
   - test:
-      name: "Polarion stub - Network Partition Handling"
-      module: grpc_admin.test_grpc_ganesha_stub.py
-      desc: Verify Network Partition Handling
-      polarion-id: CEPH-83632483
+      name: gRPC API - RemoveExport
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: Create export via ceph then remove it with ExportService.RemoveExport
+      polarion-id: CEPH-83632461
       abort-on-fail: false
       config:
-        stub_reason: Parked — HA / partition inject suite
+        operation: remove_export
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - UpdateExport
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ExportService.UpdateExport flips Access_Type via config on NFS node
+      polarion-id: CEPH-83632461
+      abort-on-fail: false
+      config:
+        operation: update_export
+        update_access_type: RO
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+        # Optional: export_config_content / fsal_user_id / fsal_secret_access_key
+
+  # =============================================================================
+  # cltmgrService.ClientMgr
+  # =============================================================================
+  - test:
+      name: gRPC API - ClientMgr ShowClients
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ClientMgr.ShowClients with active NFS mounts
+      polarion-id: CEPH-83632475
+      abort-on-fail: false
+      config:
+        operation: show_clients_mgr
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 2
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - ClientMgr AddClient
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ClientMgr.AddClient for a client IP
+      polarion-id: CEPH-83632475
+      abort-on-fail: false
+      config:
+        operation: add_client
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 2
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - ClientMgr RemoveClient
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ClientMgr.RemoveClient for a client IP
+      polarion-id: CEPH-83632475
+      abort-on-fail: false
+      config:
+        operation: remove_client
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 2
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - DisconnectNfsv41Client
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ClientMgr.DisconnectNfsv41Client for an active NFSv4.1 client
+      polarion-id: CEPH-83632475
+      abort-on-fail: false
+      config:
+        operation: disconnect_nfsv41_client
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 2
+        nfs_version: 4.1
+        port: 2049
+
+  # =============================================================================
+  # nfsService.nfsAdmin / ShowIdMapper (ShutdownGanesha intentionally skipped)
+  # =============================================================================
+  - test:
+      name: gRPC API - ReReadConfig
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.ReReadConfig succeeds
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: reread_config
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - PurgeGids
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.PurgeGids succeeds
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: purge_gids
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - PurgeNetGroups
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.PurgeNetGroups succeeds
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: purge_netgroups
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - InitFdLimit
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.InitFdLimit succeeds
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: init_fd_limit
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - ShowIdMapper
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ShowIdMapperService.ShowIdMapper succeeds
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: show_idmapper
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - PurgeIdmapperCache
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.PurgeIdmapperCache succeeds
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: purge_idmapper_cache
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - PurgeIdmapperNegativeCache
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.PurgeIdmapperNegativeCache succeeds
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: purge_idmapper_negative_cache
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - MallocTrace
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.MallocTrace enables malloc tracing to a file
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: malloc_trace
+        malloc_trace_file: /tmp/ganesha_malloc_trace.out
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - MallocUntrace
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.MallocUntrace disables malloc tracing
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: malloc_untrace
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - TrimEnable
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.TrimEnableDisable enable=true
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: trim_enable
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - TrimCall
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.TrimCall invokes malloc_trim
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: trim_call
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - TrimStatus
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.TrimStatus succeeds
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: trim_status
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - TrimDisable
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: nfsAdmin.TrimEnableDisable enable=false
+      polarion-id: CEPH-83632477
+      abort-on-fail: false
+      config:
+        operation: trim_disable
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  # =============================================================================
+  # Stats smoke only (full ExportStats / ClientStats matrix deferred)
+  # =============================================================================
+  - test:
+      name: gRPC API - ExportStats Smoke
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ExportStats StatusStats / GetNFSv41IO / GetNFSIO after light I/O
+      polarion-id: CEPH-83632479
+      abort-on-fail: false
+      config:
+        operation: export_stats_smoke
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC API - ClientStats Smoke
+      module: grpc_admin.test_grpc_ganesha_admin.py
+      desc: ClientStats.GetNFSv41IO after light I/O
+      polarion-id: CEPH-83632479
+      abort-on-fail: false
+      config:
+        operation: client_stats_smoke
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049

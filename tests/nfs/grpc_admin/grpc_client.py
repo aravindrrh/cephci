@@ -1,9 +1,13 @@
 """
-Shared gRPC client helpers for NFS-Ganesha admin tests.
+Shared gRPC client helpers for NFS-Ganesha API tests.
 
-Wraps grpcurl installation, plaintext/TLS invocation, and parsing of
-responses from nfsService.proto (GetClientId, GetNfsGrace, StartNfsGrace,
-GetSessionId).
+Wraps grpcurl installation, plaintext/TLS invocation, and RPC helpers for
+services defined in nfs-ganesha next/src/grpc_server/proto:
+
+  nfsService        — GetClientId, GetNfsGrace, StartNfsGrace, GetSessionId,
+                      nfsAdmin, ShowIdMapperService
+  exportService     — ExportService, ExportStats
+  cltmgrService     — ClientMgr, ClientStats
 """
 
 import json
@@ -26,28 +30,27 @@ DEFAULT_CERT_PATHS = {
     "server_key": "/etc/ganesha/certs/server.key",
 }
 
+# Packages / services expected when USE_GRPC=ON image includes full proto set.
 EXPECTED_GRPC_SERVICES = [
     "nfsService.GetClientId",
     "nfsService.GetNfsGrace",
     "nfsService.GetSessionId",
     "nfsService.StartNfsGrace",
+    "nfsService.nfsAdmin",
+    "nfsService.ShowIdMapperService",
+    "exportService.ExportService",
+    "exportService.ExportStats",
+    "cltmgrService.ClientMgr",
+    "cltmgrService.ClientStats",
     "grpc.reflection.v1alpha.ServerReflection",
 ]
 
-# Operations that require ExportMgr/Admin/Log protos not yet in upstream.
+# Only Log D-Bus APIs remain without a gRPC proto on upstream next.
 BLOCKED_OPERATIONS = frozenset(
     {
-        "add_export",
-        "remove_export",
-        "update_export",
-        "show_exports",
-        "display_export",
-        "shutdown",
-        "reload",
-        "grace_client_ip",
         "set_log_level",
         "get_log_level",
-        "remove_client",
+        "compare_log_parity",
     }
 )
 
@@ -83,8 +86,6 @@ def open_grpc_firewall(nfs_node, port=DEFAULT_GRPC_PORT):
 
 def build_grpcurl_target(host, port=DEFAULT_GRPC_PORT):
     """Return host:port target string for grpcurl."""
-    if ":" in host and not host.startswith("["):
-        return f"{host}:{port}"
     return f"{host}:{port}"
 
 
@@ -196,15 +197,48 @@ def expect_rpc_error(client_node, target, method, data, plaintext=True):
     return has_error
 
 
-def verify_expected_services(discovered):
-    """Return True if at least one expected nfsService is present."""
-    found = []
-    for expected in EXPECTED_GRPC_SERVICES:
-        prefix = expected.split(".")[0]
-        if any(prefix in svc for svc in discovered):
-            found.append(expected)
-    log.info("Matched expected services: %s", found)
-    return len(found) > 0
+def _service_matches(expected, discovered):
+    """
+    Return True if *expected* service name is present in *discovered*.
+
+    Matches exact equality only (grpcurl ``list`` returns fully-qualified
+    names like ``nfsService.GetClientId``). Does not treat another service
+    in the same package as a match.
+    """
+    return any(svc == expected for svc in discovered)
+
+
+def verify_expected_services(discovered, require_all=False):
+    """
+    Validate discovered services against EXPECTED_GRPC_SERVICES.
+
+    By default require all four core nfsService RPCs. When *require_all*
+    is True (full gRPC image), every expected service must be present.
+    """
+    found = [e for e in EXPECTED_GRPC_SERVICES if _service_matches(e, discovered)]
+    log.info(
+        "Matched expected services (%s/%s): %s",
+        len(found),
+        len(EXPECTED_GRPC_SERVICES),
+        found,
+    )
+    if require_all:
+        missing = [e for e in EXPECTED_GRPC_SERVICES if e not in found]
+        if missing:
+            log.error("Missing expected gRPC services: %s", missing)
+            return False
+        return True
+    core = (
+        "nfsService.GetClientId",
+        "nfsService.GetNfsGrace",
+        "nfsService.StartNfsGrace",
+        "nfsService.GetSessionId",
+    )
+    missing_core = [c for c in core if c not in found]
+    if missing_core:
+        log.error("Missing core nfsService RPCs: %s", missing_core)
+        return False
+    return True
 
 
 def verify_grpc_port_listening(nfs_node, port=DEFAULT_GRPC_PORT):
@@ -218,20 +252,29 @@ def verify_grpc_port_listening(nfs_node, port=DEFAULT_GRPC_PORT):
     return True
 
 
+def _parse_json(raw):
+    try:
+        return json.loads(raw) if raw and raw.strip() else {}
+    except json.JSONDecodeError:
+        return {}
+
+
 def get_grace_period(client_node, target, plaintext=True, tls_paths=None):
     """Call GetNfsGrace.GetGracePeriod; return (ok, ingrace_or_none, raw)."""
     method = "nfsService.GetNfsGrace/GetGracePeriod"
-    cmd = build_grpcurl_cmd(target, method, plaintext=plaintext, tls_paths=tls_paths)
+    cmd = build_grpcurl_cmd(
+        target, method, data="{}", plaintext=plaintext, tls_paths=tls_paths
+    )
     out, err, ok = grpcurl_exec(client_node, cmd)
     log.info("GetGracePeriod response: %s", out)
     if not ok:
         return False, None, out or err
 
     ingrace = None
-    try:
-        payload = json.loads(out) if out.strip() else {}
+    payload = _parse_json(out)
+    if payload:
         ingrace = payload.get("ingrace", payload.get("inGrace"))
-    except json.JSONDecodeError:
+    else:
         match = re.search(r'"?ingrace"?\s*:\s*(true|false)', out, re.IGNORECASE)
         if match:
             ingrace = match.group(1).lower() == "true"
@@ -270,20 +313,20 @@ def start_grace_with_event(
 
 def parse_id_list(raw, json_keys, regex_pattern):
     """Parse repeated ID fields from grpcurl JSON or text output."""
-    try:
-        payload = json.loads(raw) if raw.strip() else {}
+    payload = _parse_json(raw)
+    if payload:
         for key in json_keys:
             if key in payload:
                 return list(payload[key])
-    except json.JSONDecodeError:
-        pass
     return re.findall(regex_pattern, raw, re.IGNORECASE)
 
 
 def get_client_ids(client_node, target, plaintext=True, tls_paths=None):
     """Call GetClientId.GetClientIds; return (ok, ids, raw)."""
     method = "nfsService.GetClientId/GetClientIds"
-    cmd = build_grpcurl_cmd(target, method, plaintext=plaintext, tls_paths=tls_paths)
+    cmd = build_grpcurl_cmd(
+        target, method, data="{}", plaintext=plaintext, tls_paths=tls_paths
+    )
     out, err, ok = grpcurl_exec(client_node, cmd)
     log.info("GetClientIds response: %s", out)
     if not ok:
@@ -301,7 +344,9 @@ def get_client_ids(client_node, target, plaintext=True, tls_paths=None):
 def get_session_ids(client_node, target, plaintext=True, tls_paths=None):
     """Call GetSessionId.GetSessionIds; return (ok, ids, raw)."""
     method = "nfsService.GetSessionId/GetSessionIds"
-    cmd = build_grpcurl_cmd(target, method, plaintext=plaintext, tls_paths=tls_paths)
+    cmd = build_grpcurl_cmd(
+        target, method, data="{}", plaintext=plaintext, tls_paths=tls_paths
+    )
     out, err, ok = grpcurl_exec(client_node, cmd)
     log.info("GetSessionIds response: %s", out)
     if not ok:
@@ -312,6 +357,325 @@ def get_session_ids(client_node, target, plaintext=True, tls_paths=None):
         r'"?sessionId"?\s*:\s*"?([^",\s]+)"?',
     )
     return True, ids, out
+
+
+# ---------------------------------------------------------------------------
+# exportService.ExportService
+# ---------------------------------------------------------------------------
+
+
+def show_exports(client_node, target, plaintext=True, tls_paths=None):
+    """Call ExportService.ShowExports; return (ok, exports_list, raw)."""
+    method = "exportService.ExportService/ShowExports"
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data="{}",
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("ShowExports response: %s", out)
+    if not ok:
+        return False, [], out or err
+    payload = _parse_json(out)
+    exports = payload.get("exports", [])
+    if payload.get("success") is False:
+        return False, exports, out
+    return True, exports, out
+
+
+def display_export(client_node, target, export_id, plaintext=True, tls_paths=None):
+    """Call ExportService.DisplayExport; return (ok, payload, raw)."""
+    method = "exportService.ExportService/DisplayExport"
+    data = json.dumps({"export_id": int(export_id)})
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("DisplayExport(%s) response: %s", export_id, out)
+    if not ok:
+        return False, {}, out or err
+    payload = _parse_json(out)
+    if payload.get("success") is False:
+        return False, payload, out
+    return True, payload, out
+
+
+def add_export(
+    client_node,
+    target,
+    file_path,
+    export_expression="EXPORT",
+    plaintext=True,
+    tls_paths=None,
+):
+    """Call ExportService.AddExport; return (ok, raw)."""
+    method = "exportService.ExportService/AddExport"
+    data = json.dumps(
+        {"file_path": file_path, "export_expression": export_expression}
+    )
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("AddExport response: %s", out)
+    payload = _parse_json(out)
+    if payload and payload.get("success") is False:
+        return False, out or err
+    return ok, out or err
+
+
+def remove_export(client_node, target, export_id, plaintext=True, tls_paths=None):
+    """Call ExportService.RemoveExport; return (ok, raw)."""
+    method = "exportService.ExportService/RemoveExport"
+    data = json.dumps({"export_id": int(export_id)})
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("RemoveExport(%s) response: %s", export_id, out)
+    payload = _parse_json(out)
+    if payload and payload.get("success") is False:
+        return False, out or err
+    return ok, out or err
+
+
+def update_export(
+    client_node,
+    target,
+    file_path,
+    export_expression="EXPORT",
+    plaintext=True,
+    tls_paths=None,
+):
+    """Call ExportService.UpdateExport; return (ok, raw)."""
+    method = "exportService.ExportService/UpdateExport"
+    data = json.dumps(
+        {"file_path": file_path, "export_expression": export_expression}
+    )
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("UpdateExport response: %s", out)
+    payload = _parse_json(out)
+    if payload and payload.get("success") is False:
+        return False, out or err
+    return ok, out or err
+
+
+# ---------------------------------------------------------------------------
+# exportService.ExportStats / cltmgrService.ClientStats
+# ---------------------------------------------------------------------------
+
+
+def export_stats(
+    client_node,
+    target,
+    rpc_name,
+    export_id=None,
+    plaintext=True,
+    tls_paths=None,
+):
+    """
+    Call an ExportStats RPC.
+
+    *rpc_name* examples: GetNFSv41IO, GetTotalOPS, GetNFSIO, StatusStats,
+    ResetStats, ShowFDUsage, ShowMDCache.
+    """
+    method = f"exportService.ExportStats/{rpc_name}"
+    data = "{}"
+    if export_id is not None:
+        data = json.dumps({"export_id": int(export_id)})
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("ExportStats.%s response: %s", rpc_name, out[:500] if out else out)
+    return ok, out or err
+
+
+def client_stats(
+    client_node,
+    target,
+    rpc_name,
+    ipaddr,
+    plaintext=True,
+    tls_paths=None,
+):
+    """Call a ClientStats RPC that takes ClientIpRequest."""
+    method = f"cltmgrService.ClientStats/{rpc_name}"
+    data = json.dumps({"ipaddr": ipaddr})
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("ClientStats.%s(%s) response: %s", rpc_name, ipaddr, out[:500] if out else out)
+    return ok, out or err
+
+
+# ---------------------------------------------------------------------------
+# cltmgrService.ClientMgr
+# ---------------------------------------------------------------------------
+
+
+def show_clients(client_node, target, plaintext=True, tls_paths=None):
+    """Call ClientMgr.ShowClients; return (ok, clients_list, raw)."""
+    method = "cltmgrService.ClientMgr/ShowClients"
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data="{}",
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("ShowClients response: %s", out)
+    if not ok:
+        return False, [], out or err
+    payload = _parse_json(out)
+    clients = payload.get("clients", [])
+    return True, clients, out
+
+
+def add_client(client_node, target, ipaddr, plaintext=True, tls_paths=None):
+    """Call ClientMgr.AddClient; return (ok, raw)."""
+    method = "cltmgrService.ClientMgr/AddClient"
+    data = json.dumps({"ipaddr": ipaddr})
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("AddClient(%s) response: %s", ipaddr, out)
+    payload = _parse_json(out)
+    if payload and payload.get("success") is False:
+        return False, out or err
+    return ok, out or err
+
+
+def remove_client(client_node, target, ipaddr, plaintext=True, tls_paths=None):
+    """Call ClientMgr.RemoveClient; return (ok, raw)."""
+    method = "cltmgrService.ClientMgr/RemoveClient"
+    data = json.dumps({"ipaddr": ipaddr})
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("RemoveClient(%s) response: %s", ipaddr, out)
+    payload = _parse_json(out)
+    if payload and payload.get("success") is False:
+        return False, out or err
+    return ok, out or err
+
+
+def disconnect_nfsv41_client(
+    client_node, target, ipaddr, plaintext=True, tls_paths=None
+):
+    """Call ClientMgr.DisconnectNfsv41Client; return (ok, raw)."""
+    method = "cltmgrService.ClientMgr/DisconnectNfsv41Client"
+    data = json.dumps({"ipaddr": ipaddr})
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("DisconnectNfsv41Client(%s) response: %s", ipaddr, out)
+    payload = _parse_json(out)
+    status = payload.get("status") or {}
+    if isinstance(status, dict) and status.get("success") is False:
+        return False, out or err
+    return ok, out or err
+
+
+# ---------------------------------------------------------------------------
+# nfsService.nfsAdmin / ShowIdMapperService
+# ---------------------------------------------------------------------------
+
+
+def admin_rpc(
+    client_node,
+    target,
+    rpc_name,
+    data=None,
+    plaintext=True,
+    tls_paths=None,
+):
+    """
+    Call nfsService.nfsAdmin/<rpc_name>; return (ok, raw).
+
+    Defaults *data* to ``{}`` so EmptyRequest RPCs work reliably with grpcurl.
+    Treats ActionResponse/MessageResponse ``success: false`` as failure.
+    """
+    method = f"nfsService.nfsAdmin/{rpc_name}"
+    if data is None:
+        data = "{}"
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data=data,
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("nfsAdmin.%s response: %s", rpc_name, out)
+    payload = _parse_json(out)
+    if payload.get("success") is False:
+        return False, out or err
+    return ok, out or err
+
+
+def show_idmapper(client_node, target, plaintext=True, tls_paths=None):
+    """Call ShowIdMapperService.ShowIdMapper; return (ok, entries, raw)."""
+    method = "nfsService.ShowIdMapperService/ShowIdMapper"
+    ok, out, err = invoke_grpc_method(
+        client_node,
+        target,
+        method,
+        data="{}",
+        plaintext=plaintext,
+        tls_paths=tls_paths,
+    )
+    log.info("ShowIdMapper response: %s", out)
+    if not ok:
+        return False, [], out or err
+    payload = _parse_json(out)
+    return True, payload.get("entries", []), out
 
 
 def tls_paths_from_config(config):
@@ -340,8 +704,8 @@ def check_blocked_operation(operation, config):
     if not blocked:
         return None
     msg = (
-        f"Operation '{operation}' is blocked pending ExportMgr/Admin/Log "
-        "gRPC proto in upstream nfs-ganesha"
+        f"Operation '{operation}' is blocked — Log gRPC proto not yet in "
+        "upstream nfs-ganesha (or explicitly marked blocked in suite config)"
     )
     if config.get("skip_if_blocked", True):
         log.info("SKIP: %s", msg)
@@ -384,3 +748,11 @@ def prepare_cluster_nodes(ceph_cluster, config):
 def ensure_subvolume_group(client, fs_name, group="ganeshagroup"):
     """Create NFS subvolume group if needed."""
     Ceph(client).fs.sub_volume_group.create(volume=fs_name, group=group)
+
+
+def first_export_id(exports):
+    """Return the first export_id from a ShowExports list, or None."""
+    if not exports:
+        return None
+    entry = exports[0]
+    return entry.get("exportId", entry.get("export_id"))

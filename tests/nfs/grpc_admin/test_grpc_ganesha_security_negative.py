@@ -1,16 +1,14 @@
 """
 gRPC transport and security negative tests (single-node).
 
-Validates port binding, service discovery, loopback targeting, and
-connection failure handling. mTLS negative cases are included as stubs
-until TLS is enabled in the test environment.
+Validates port binding, service discovery, loopback targeting, mTLS,
+and connection / invalid-RPC failure handling.
 """
 
 from cli.exceptions import ConfigError, OperationFailedError
 from tests.nfs.grpc_admin.grpc_client import (
     DEFAULT_GRPC_PORT,
     DEFAULT_GRPC_UDS_PATH,
-    check_blocked_operation,
     ensure_subvolume_group,
     expect_rpc_error,
     install_grpcurl,
@@ -23,6 +21,7 @@ from tests.nfs.grpc_admin.grpc_client import (
     tls_paths_from_config,
     verify_grpc_port_listening,
 )
+from tests.nfs.grpc_admin.grpc_deploy import deploy_grpc_certs_if_configured
 from tests.nfs.nfs_operations import cleanup_cluster, setup_nfs_cluster
 from utility.log import Log
 
@@ -37,10 +36,10 @@ def run(ceph_cluster, **kw):
         verify_tcp_discovery — grpcurl list over cluster IP (plaintext)
         verify_loopback_discovery — grpcurl list via 127.0.0.1 on NFS node
         verify_bad_port_rejected — connection to wrong port fails
-        verify_tls_required — skipped until mTLS certs deployed in suite
-        verify_tls_bad_cert — skipped until mTLS certs deployed in suite
+        verify_tls_required — mTLS discovery; plaintext must fail when TLS required
+        verify_tls_bad_cert — invalid client cert rejected
         verify_uds_discovery — grpcurl list over Unix domain socket
-        verify_admin_auth_matrix — Admin RPC auth (skip until AdminService proto)
+        verify_admin_auth_matrix — nfsAdmin RPC with mTLS vs plaintext
         verify_invalid_protobuf — malformed JSON body rejected
         verify_missing_fields — required fields missing rejected
         verify_timeout — short client timeout yields DEADLINE_EXCEEDED / failure
@@ -51,7 +50,8 @@ def run(ceph_cluster, **kw):
         raise ConfigError("'operation' is required in config")
 
     tls_blocked = operation in ("verify_tls_required", "verify_tls_bad_cert")
-    if tls_blocked and config.get("skip_if_blocked", True):
+    # Only skip when suite explicitly marks blocked; mTLS tests set skip_if_blocked: false.
+    if tls_blocked and config.get("blocked", False) and config.get("skip_if_blocked", True):
         log.info(
             "SKIP: %s pending mTLS cert deployment in gRPC admin suite",
             operation,
@@ -70,6 +70,8 @@ def run(ceph_cluster, **kw):
     clients, nfs_nodes, client, nfs_node, nfs_server, nfs_ip = prepare_cluster_nodes(
         ceph_cluster, config
     )
+    installers = ceph_cluster.get_nodes("installer")
+    installer = installers[0] if installers else None
     target = resolve_grpc_target(config, nfs_ip)
 
     try:
@@ -90,6 +92,7 @@ def run(ceph_cluster, **kw):
             fs=fs,
             ceph_cluster=ceph_cluster,
         )
+        deploy_grpc_certs_if_configured(config, nfs_node, nfs_name, installer)
 
         if operation == "verify_port_listening":
             if not verify_grpc_port_listening(nfs_node, grpc_port):
@@ -124,9 +127,6 @@ def run(ceph_cluster, **kw):
             log.info("Connection to bad port %s failed as expected", bad_port)
 
         elif operation == "verify_tls_required":
-            skip_rc = check_blocked_operation(operation, config)
-            if skip_rc is not None:
-                return skip_rc
             tls_paths = tls_paths_from_config(config)
             ok, _ = list_grpc_services(
                 client, target, plaintext=False, tls_paths=tls_paths
@@ -141,9 +141,6 @@ def run(ceph_cluster, **kw):
                 )
 
         elif operation == "verify_tls_bad_cert":
-            skip_rc = check_blocked_operation(operation, config)
-            if skip_rc is not None:
-                return skip_rc
             tls_paths = tls_paths_from_config(config)
             tls_paths["client_cert"] = config.get(
                 "bad_client_cert", "/etc/ganesha/certs/bogus.crt"
@@ -171,11 +168,9 @@ def run(ceph_cluster, **kw):
                 )
 
         elif operation == "verify_admin_auth_matrix":
-            skip_rc = check_blocked_operation("shutdown", config)
-            if skip_rc is not None:
-                return skip_rc
+            # Prefer a non-destructive admin RPC for the auth matrix.
             admin_method = config.get(
-                "admin_method", "adminService.Admin/Shutdown"
+                "admin_method", "nfsService.nfsAdmin/ReReadConfig"
             )
             tls_paths = tls_paths_from_config(config)
             ok, _, _ = invoke_grpc_method(
@@ -186,8 +181,11 @@ def run(ceph_cluster, **kw):
                 plaintext=False,
                 tls_paths=tls_paths,
             )
-            if ok:
-                log.info("Admin RPC accepted with valid credentials")
+            if not ok and not config.get("allow_mtls_failure", False):
+                raise OperationFailedError(
+                    f"Admin RPC {admin_method} failed with valid mTLS credentials"
+                )
+            log.info("Admin RPC accepted with valid credentials: %s", ok)
             ok_plain, _, _ = invoke_grpc_method(
                 client, target, admin_method, data="{}", plaintext=True
             )

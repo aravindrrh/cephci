@@ -1,25 +1,28 @@
 """
-gRPC admin performance tests for NFS-Ganesha on cephadm NFS.
+gRPC API performance tests for NFS-Ganesha on cephadm NFS.
 
-Measures latency of implemented nfsService RPCs under light client load.
-ExportMgr perf (83632487) skips until upstream proto is available.
+Measures latency of gRPC admin/export RPCs under light client load.
 """
 
 import statistics
 import time
 
+from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
 from tests.nfs.grpc_admin.grpc_client import (
     DEFAULT_GRPC_PORT,
-    check_blocked_operation,
     ensure_subvolume_group,
+    first_export_id,
     get_client_ids,
     get_grace_period,
     install_grpcurl,
     list_grpc_services,
     open_grpc_firewall,
     prepare_cluster_nodes,
+    remove_export,
     resolve_grpc_target,
+    show_clients,
+    show_exports,
 )
 from tests.nfs.nfs_operations import cleanup_cluster, setup_nfs_cluster
 from utility.log import Log
@@ -45,11 +48,13 @@ def _percentile(samples, pct):
 
 def _mount_extra_clients(clients, nfs_server, nfs_mount, nfs_export, nfs_version, nfs_port):
     """Mount NFS on additional clients to increase ShowClients cardinality."""
+    # setup_nfs_cluster creates exports as ``{export}_0`` (e.g. /export_0).
+    export_path = nfs_export if nfs_export.endswith("_0") else f"{nfs_export}_0"
     for client in clients[1:]:
         client.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mount}", check_ec=False)
         mount_cmd = (
             f"mount -t nfs -o vers={nfs_version},proto=tcp,port={nfs_port} "
-            f"{nfs_server}:{nfs_export} {nfs_mount}"
+            f"{nfs_server}:{export_path} {nfs_mount}"
         )
         client.exec_command(sudo=True, cmd=mount_cmd, check_ec=False)
         client.exec_command(
@@ -65,18 +70,13 @@ def run(ceph_cluster, **kw):
 
         admin_perf_under_load — list_services / GetGracePeriod latency
         stats_collection_vs_io — poll GetClientIds while light I/O runs
-        show_clients_at_scale — GetClientIds latency with multiple mounts
-        export_ops_perf — blocked until ExportMgr proto
+        show_clients_at_scale — ClientMgr.ShowClients latency with mounts
+        export_ops_perf — ShowExports / RemoveExport loop latency
     """
     config = kw.get("config", {})
     operation = config.get("operation")
     if not operation:
         raise ConfigError("'operation' is required in config")
-
-    if operation == "export_ops_perf":
-        skip_rc = check_blocked_operation("add_export", config)
-        if skip_rc is not None:
-            return skip_rc
 
     nfs_name = config.get("nfs_name", "cephfs-nfs")
     nfs_export = config.get("nfs_export", "/export")
@@ -172,14 +172,18 @@ def run(ceph_cluster, **kw):
             )
             latencies = []
             for _ in range(samples):
-                ms, (ok, ids, _) = _timed_call(
-                    get_client_ids, client, target, True, None
+                ms, (ok, mgr_clients, _) = _timed_call(
+                    show_clients, client, target, True, None
                 )
                 if ok:
                     latencies.append(ms)
-                    log.info("GetClientIds returned %s ids in %.1fms", len(ids), ms)
+                    log.info(
+                        "ShowClients returned %s clients in %.1fms",
+                        len(mgr_clients),
+                        ms,
+                    )
             if not latencies:
-                raise OperationFailedError("GetClientIds failed at scale")
+                raise OperationFailedError("ClientMgr.ShowClients failed at scale")
             p99 = _percentile(latencies, 99)
             if p99 > p99_max_ms:
                 raise OperationFailedError(
@@ -187,7 +191,50 @@ def run(ceph_cluster, **kw):
                 )
 
         elif operation == "export_ops_perf":
-            raise ConfigError("export_ops_perf should have been skipped above")
+            # Measure ShowExports + RemoveExport using temporary ceph-created exports.
+            latencies = []
+            loops = int(config.get("export_loops", min(samples, 5)))
+            for i in range(loops):
+                exp_path = f"{nfs_export}_grpc_perf_{i}"
+                Ceph(client).nfs.export.create(
+                    fs_name=fs_name,
+                    nfs_name=nfs_name,
+                    nfs_export=exp_path,
+                    fs=fs,
+                )
+                time.sleep(2)
+                ms_show, (ok, exports, _) = _timed_call(
+                    show_exports, client, target, True, None
+                )
+                if not ok:
+                    raise OperationFailedError("ShowExports failed during export_ops_perf")
+                latencies.append(ms_show)
+                # Match the temporary export — never remove an unmatched primary export.
+                export_id = None
+                for entry in exports:
+                    pseudo = entry.get("pseudoPath") or entry.get("pseudo_path") or ""
+                    if exp_path in pseudo:
+                        export_id = first_export_id([entry])
+                        break
+                if export_id is None:
+                    log.warning(
+                        "Could not match export %s in ShowExports; skipping RemoveExport",
+                        exp_path,
+                    )
+                    continue
+                ms_rm, (ok, _) = _timed_call(
+                    remove_export, client, target, export_id, True, None
+                )
+                if ok:
+                    latencies.append(ms_rm)
+            if not latencies:
+                raise OperationFailedError("No export op latency samples collected")
+            p99 = _percentile(latencies, 99)
+            log.info("Export ops perf p99=%.1fms (n=%s)", p99, len(latencies))
+            if p99 > p99_max_ms:
+                raise OperationFailedError(
+                    f"Export ops p99 {p99:.1f}ms exceeds {p99_max_ms}ms"
+                )
 
         else:
             raise ConfigError(f"Unknown perf operation: {operation}")
