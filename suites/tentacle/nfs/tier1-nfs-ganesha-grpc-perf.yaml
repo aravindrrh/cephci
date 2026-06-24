@@ -1,0 +1,225 @@
+#===============================================================================================
+#---  NFS Ganesha gRPC Performance + Build Suite (CephFS) ---
+#===============================================================================================
+# Conf: conf/tentacle/nfs/1admin-7node-3client.yaml
+#
+# Phase-3 perf, build verification, dual-stack, and proto compile smoke.
+# Requires gRPC-enabled cephadm NFS image — set nfs_container_image in Jenkins or below.
+#===============================================================================================
+tests:
+  - test:
+      abort-on-fail: true
+      desc: Install software pre-requisites for cluster deployment.
+      module: install_prereq.py
+      name: setup pre-requisites
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: bootstrap
+              service: cephadm
+              args:
+                mon-ip: node1
+          - config:
+              command: add_hosts
+              service: host
+              args:
+                attach_ip_address: true
+                labels: apply-all-labels
+          - config:
+              command: apply
+              service: osd
+              args:
+                all-available-devices: true
+          - config:
+              args:
+                - "ceph fs volume create cephfs"
+              command: shell
+          - config:
+              args:
+                placement:
+                  label: mds
+              base_cmd_args:
+                verbose: true
+              command: apply
+              pos_args:
+                - cephfs
+              service: mds
+      desc: Bootstrap and deploy Ceph services for gRPC perf/build testing.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: Deploy cluster using cephadm
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node4
+        install_packages:
+          - ceph-common
+          - ceph-fuse
+        copy_admin_keyring: true
+      desc: Configure client 1
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client 1
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.2
+        node: node5
+        install_packages:
+          - ceph-common
+          - ceph-fuse
+        copy_admin_keyring: true
+      desc: Configure client 2
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client 2
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.3
+        node: node6
+        install_packages:
+          - ceph-common
+          - ceph-fuse
+        copy_admin_keyring: true
+      desc: Configure client 3
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client 3
+
+  - test:
+      name: gRPC Perf - Set NFS Container Image
+      module: grpc_admin.test_grpc_ganesha_deploy.py
+      desc: Apply nfs_container_image override before NFS cluster create
+      abort-on-fail: false
+      config:
+        operation: set_nfs_image
+        # nfs_container_image: quay.io/rhceph/nfs-ganesha-grpc:<tag>
+
+  - test:
+      name: gRPC Perf - Admin Performance Under Load
+      module: grpc_admin.test_grpc_ganesha_perf.py
+      desc: Measure list_services / GetGracePeriod latency under light load
+      polarion-id: CEPH-83632484
+      abort-on-fail: false
+      config:
+        operation: admin_perf_under_load
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+        samples: 20
+        p99_max_ms: 5000
+
+  - test:
+      name: gRPC Perf - Stats Collection vs I/O
+      module: grpc_admin.test_grpc_ganesha_perf.py
+      desc: Poll GetClientIds while light NFS I/O runs
+      polarion-id: CEPH-83632485
+      abort-on-fail: false
+      config:
+        operation: stats_collection_vs_io
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 3
+        nfs_version: 4.1
+        port: 2049
+        samples: 15
+        p99_max_ms: 8000
+
+  - test:
+      name: gRPC Perf - ShowClients at Scale
+      module: grpc_admin.test_grpc_ganesha_perf.py
+      desc: GetClientIds latency with multiple NFS client mounts
+      polarion-id: CEPH-83632486
+      abort-on-fail: false
+      config:
+        operation: show_clients_at_scale
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 3
+        nfs_version: 4.1
+        port: 2049
+        samples: 15
+        p99_max_ms: 8000
+
+  - test:
+      name: gRPC Perf - Export Operations Performance
+      module: grpc_admin.test_grpc_ganesha_perf.py
+      desc: ExportMgr add/remove loop — skipped until upstream proto
+      polarion-id: CEPH-83632487
+      abort-on-fail: false
+      config:
+        operation: export_ops_perf
+        blocked: true
+        skip_if_blocked: true
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        clients: 1
+
+  - test:
+      name: gRPC Build - gRPC Build Configuration
+      module: grpc_admin.test_grpc_ganesha_build.py
+      desc: Verify gRPC packages and ganesha binary in NFS container
+      polarion-id: CEPH-83632492
+      abort-on-fail: false
+      config:
+        operation: verify_grpc_build
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC Build - Dual-Stack D-Bus + gRPC
+      module: grpc_admin.test_grpc_ganesha_build.py
+      desc: Verify D-Bus ShowExports and grpcurl list both work
+      polarion-id: CEPH-83632493
+      abort-on-fail: false
+      config:
+        operation: verify_dual_stack
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+
+  - test:
+      name: gRPC Build - Proto Schema Compatibility
+      module: grpc_admin.test_grpc_ganesha_build.py
+      desc: protoc smoke on bundled .proto in NFS container
+      polarion-id: CEPH-83632470
+      abort-on-fail: false
+      config:
+        operation: verify_proto_compile
+        nfs_name: cephfs-nfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs
+        fs_name: cephfs
+        clients: 1
+        nfs_version: 4.1
+        port: 2049
+        skip_if_no_proto: true
+        skip_if_no_protoc: true

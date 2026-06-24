@@ -1,0 +1,98 @@
+"""
+Deploy and verify gRPC-enabled cephadm NFS image configuration.
+
+Run early in gRPC suites (after bootstrap, before NFS cluster create).
+
+Operations:
+    set_nfs_image — apply ``nfs_container_image`` via mgr config
+    verify_grpc_bootstrap — post-NFS-deploy gRPC port + discovery smoke
+"""
+
+from cli.exceptions import ConfigError, OperationFailedError
+from tests.nfs.grpc_admin.grpc_client import (
+    ensure_subvolume_group,
+    install_grpcurl,
+    open_grpc_firewall,
+    prepare_cluster_nodes,
+    resolve_grpc_target,
+)
+from tests.nfs.grpc_admin.grpc_deploy import (
+    apply_nfs_container_image,
+    resolve_nfs_container_image,
+    verify_grpc_in_nfs_pod,
+)
+from tests.nfs.nfs_operations import cleanup_cluster, setup_nfs_cluster
+from utility.log import Log
+
+log = Log(__name__)
+
+
+def run(ceph_cluster, **kw):
+    config = kw.get("config", {})
+    operation = config.get("operation")
+    if not operation:
+        raise ConfigError("'operation' is required in config")
+
+    installers = ceph_cluster.get_nodes("installer")
+    if not installers:
+        raise OperationFailedError("No installer node available")
+    installer = installers[0]
+
+    if operation == "set_nfs_image":
+        image = resolve_nfs_container_image(config)
+        if not image:
+            log.info(
+                "No nfs_container_image in config — using default cephadm NFS image"
+            )
+            return 0
+        apply_nfs_container_image(installer, image)
+        return 0
+
+    if operation == "verify_grpc_bootstrap":
+        clients, nfs_nodes, client, nfs_node, nfs_server, nfs_ip = (
+            prepare_cluster_nodes(ceph_cluster, config)
+        )
+        nfs_name = config.get("nfs_name", "cephfs-nfs")
+        nfs_export = config.get("nfs_export", "/export")
+        nfs_mount = config.get("nfs_mount", "/mnt/nfs")
+        nfs_version = config.get("nfs_version", 4.1)
+        nfs_port = config.get("port", 2049)
+        fs_name = config.get("fs_name", "cephfs")
+        fs = config.get("fs", "cephfs")
+
+        image = resolve_nfs_container_image(config)
+        if image:
+            apply_nfs_container_image(installer, image)
+
+        try:
+            install_grpcurl(client)
+            open_grpc_firewall(nfs_node)
+            ensure_subvolume_group(client, fs_name)
+            setup_nfs_cluster(
+                clients=[client],
+                nfs_server=nfs_server,
+                port=nfs_port,
+                version=nfs_version,
+                nfs_name=nfs_name,
+                nfs_mount=nfs_mount,
+                fs_name=fs_name,
+                export=nfs_export,
+                fs=fs,
+                ceph_cluster=ceph_cluster,
+            )
+            target = resolve_grpc_target(config, nfs_ip)
+            if not verify_grpc_in_nfs_pod(nfs_node, client, nfs_ip):
+                raise OperationFailedError(
+                    f"gRPC bootstrap verification failed on {target}"
+                )
+            log.info("gRPC bootstrap verification passed on %s", target)
+            return 0
+        finally:
+            try:
+                cleanup_cluster(
+                    client, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node
+                )
+            except Exception as exc:
+                log.warning("Cleanup error (non-fatal): %s", exc)
+
+    raise ConfigError(f"Unknown deploy operation: {operation}")

@@ -1,0 +1,164 @@
+#===============================================================================================
+#------------------------------
+#--- NFS Monitoring/Bind Tests ---
+#------------------------------
+# Conf: conf/tentacle/nfs/1admin-7node-3client.yaml
+# Test cases for NFS Ganesha monitoring/bind address feature:
+#    - Positive: ip_addrs + monitoring_ip_addrs + custom monitoring_port
+#    - Positive: monitoring_networks fallback for monitoring address
+#    - Negative: invalid ip_addrs
+#    - Negative: invalid monitoring_ip_addrs (fallback to default bind behavior)
+#    - Negative: virtual_ip and ip_addrs conflict
+#    - Negative: monitoring_port collision
+#
+#===============================================================================================
+tests:
+  - test:
+      abort-on-fail: true
+      desc: Install software pre-requisites for cluster deployment.
+      module: install_prereq.py
+      name: setup pre-requisites
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: bootstrap
+              service: cephadm
+              args:
+                mon-ip: node1
+          - config:
+              command: add_hosts
+              service: host
+              args:
+                attach_ip_address: true
+                labels: apply-all-labels
+          - config:
+              command: apply
+              service: osd
+              args:
+                all-available-devices: true
+          - config:
+              args:
+                - "ceph fs volume create cephfs"
+              command: shell
+          - config:
+              args:
+                placement:
+                  label: mds
+              base_cmd_args:
+                verbose: true
+              command: apply
+              pos_args:
+                - cephfs
+              service: mds
+      desc: Bootstrap and deploy Ceph services for monitoring/bind testing.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: Deploy cluster using cephadm
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node4
+        install_packages:
+          - ceph-common
+          - ceph-fuse
+        copy_admin_keyring: true
+      desc: Configure client 1 for NFS monitoring/bind testing
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client 1
+
+  - test:
+      name: NFS monitoring/bind - valid ip_addrs and monitoring_ip_addrs
+      module: test_nfs_monitoring_bind_config.py
+      desc: Verify valid bind and monitoring addresses with custom monitoring port
+      abort-on-fail: false
+      config:
+        operation: verify_valid_bind_and_monitoring
+        nfs_name_prefix: monbind-valid-a
+        fs_name: cephfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs_monbind_a
+        nfs_version: 4.1
+        port: 2050
+        monitoring_port: 9650
+
+  - test:
+      name: NFS monitoring/bind - monitoring_networks fallback
+      module: test_nfs_monitoring_bind_config.py
+      desc: Verify monitoring address is selected using monitoring_networks fallback
+      abort-on-fail: false
+      config:
+        operation: verify_valid_monitoring_network_fallback
+        nfs_name_prefix: monbind-valid-b
+        fs_name: cephfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs_monbind_b
+        nfs_version: 4.1
+        port: 2051
+        monitoring_port: 9651
+
+  - test:
+      name: NFS monitoring/bind - invalid ip_addrs should fail
+      module: test_nfs_monitoring_bind_config.py
+      desc: Verify deploy fails when ip_addrs contains an IP not configured on target host
+      abort-on-fail: false
+      config:
+        operation: verify_invalid_ip_addrs
+        nfs_name_prefix: monbind-neg-ip
+        fs_name: cephfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs_monbind_c
+        nfs_version: 4.1
+        port: 2052
+        monitoring_port: 9652
+
+  - test:
+      name: NFS monitoring/bind - invalid monitoring_ip_addrs fallback behavior
+      module: test_nfs_monitoring_bind_config.py
+      desc: Verify invalid monitoring_ip_addrs does not bind to invalid IP and falls back
+      abort-on-fail: false
+      config:
+        operation: verify_invalid_monitoring_ip
+        nfs_name_prefix: monbind-neg-monip
+        fs_name: cephfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs_monbind_d
+        nfs_version: 4.1
+        port: 2053
+        monitoring_port: 9653
+
+  - test:
+      name: NFS monitoring/bind - virtual_ip and ip_addrs conflict
+      module: test_nfs_monitoring_bind_config.py
+      desc: Verify spec validation fails when virtual_ip and ip_addrs are both set
+      abort-on-fail: false
+      config:
+        operation: verify_virtual_ip_conflict
+        nfs_name_prefix: monbind-neg-vip
+        fs_name: cephfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs_monbind_e
+        nfs_version: 4.1
+        port: 2054
+        monitoring_port: 9654
+
+  - test:
+      name: NFS monitoring/bind - monitoring_port collision
+      module: test_nfs_monitoring_bind_config.py
+      desc: Verify deploy fails or service remains unhealthy when monitoring_port collides
+      abort-on-fail: false
+      config:
+        operation: verify_monitoring_port_collision
+        nfs_name_prefix: monbind-neg-port
+        fs_name: cephfs
+        nfs_export: /export
+        nfs_mount: /mnt/nfs_monbind_f
+        nfs_version: 4.1
+        port: 2055
+        monitoring_port: 2055
