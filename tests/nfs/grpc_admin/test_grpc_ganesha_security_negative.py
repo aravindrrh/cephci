@@ -23,6 +23,7 @@ from tests.nfs.grpc_admin.grpc_client import (
     tls_paths_from_config,
     verify_grpc_port_listening,
 )
+from tests.nfs.grpc_admin.grpc_deploy import deploy_grpc_certs_if_configured
 from tests.nfs.nfs_operations import cleanup_cluster, setup_nfs_cluster
 from utility.log import Log
 
@@ -70,6 +71,8 @@ def run(ceph_cluster, **kw):
     clients, nfs_nodes, client, nfs_node, nfs_server, nfs_ip = prepare_cluster_nodes(
         ceph_cluster, config
     )
+    installers = ceph_cluster.get_nodes("installer")
+    installer = installers[0] if installers else None
     target = resolve_grpc_target(config, nfs_ip)
 
     try:
@@ -90,6 +93,7 @@ def run(ceph_cluster, **kw):
             fs=fs,
             ceph_cluster=ceph_cluster,
         )
+        deploy_grpc_certs_if_configured(config, nfs_node, nfs_name, installer)
 
         if operation == "verify_port_listening":
             if not verify_grpc_port_listening(nfs_node, grpc_port):

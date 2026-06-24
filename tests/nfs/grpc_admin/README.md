@@ -178,6 +178,37 @@ config:
 Without this image, regression and admin tests that need port 50051 will fail;
 proto-blocked operations still skip cleanly (rc=-1).
 
+## Temporary mTLS cert deploy (manual `/root/certs`)
+
+Place TLS files on the **NFS node** before running mTLS tests:
+
+```
+/root/certs/ca.crt
+/root/certs/server.crt
+/root/certs/server.key
+/root/certs/client.crt
+/root/certs/client.key
+```
+
+Enable copy in suite test config:
+
+```yaml
+config:
+  deploy_grpc_certs: true
+  grpc_cert_source: /root/certs
+  restart_nfs_after_cert_copy: true
+```
+
+This copies into the cephadm instance path on the host, e.g.:
+
+```
+/var/lib/ceph/<fsid>/nfs.cephfs-nfs.0.0.<hostname>.<id>/etc/ganesha/certs/
+```
+
+which is bind-mounted into the running nfs-ganesha container. Implemented in
+`grpc_deploy.copy_grpc_certs_to_nfs_instances()`; also available as deploy
+operation `deploy_grpc_certs` in `test_grpc_ganesha_deploy.py`.
+
 ## Open items
 
 - [x] Polarion IDs for all admin test cases

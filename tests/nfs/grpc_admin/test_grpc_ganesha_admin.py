@@ -27,6 +27,7 @@ from tests.nfs.grpc_admin.grpc_client import (
     verify_expected_services,
     verify_grpc_port_listening,
 )
+from tests.nfs.grpc_admin.grpc_deploy import deploy_grpc_certs_if_configured
 from tests.nfs.nfs_operations import cleanup_cluster, nfs_log_parser, setup_nfs_cluster
 from utility.log import Log
 
@@ -120,6 +121,8 @@ def run(ceph_cluster, **kw):
     clients, nfs_nodes, client, nfs_node, nfs_server, nfs_ip = prepare_cluster_nodes(
         ceph_cluster, config
     )
+    installers = ceph_cluster.get_nodes("installer")
+    installer = installers[0] if installers else None
     target = resolve_grpc_target(config, nfs_ip)
     plaintext = not _use_tls(config)
     tls_paths = None if plaintext else tls_paths_from_config(config)
@@ -149,6 +152,7 @@ def run(ceph_cluster, **kw):
                 enable_rdma=config.get("enable_rdma", False),
                 rdma_port=config.get("rdma_port"),
             )
+            deploy_grpc_certs_if_configured(config, nfs_node, nfs_name, installer)
 
         export_path = f"{nfs_export}_0"
 

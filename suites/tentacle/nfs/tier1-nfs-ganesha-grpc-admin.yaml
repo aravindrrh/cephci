@@ -286,17 +286,23 @@ tests:
         clients: 1
 
   - test:
-      name: gRPC Admin - mTLS Required (blocked)
+      name: gRPC Admin - mTLS Required
       module: grpc_admin.test_grpc_ganesha_security_negative.py
-      desc: mTLS positive/negative — skipped until certs deployed in suite
+      desc: mTLS positive/negative with certs copied from /root/certs on NFS node
       polarion-id: CEPH-83632472
       abort-on-fail: false
       config:
         operation: verify_tls_required
-        skip_if_blocked: true
+        skip_if_blocked: false
+        deploy_grpc_certs: true
+        grpc_cert_source: /root/certs
+        restart_nfs_after_cert_copy: true
         nfs_name: cephfs-nfs
         nfs_export: /export
+        nfs_mount: /mnt/nfs
         clients: 1
+        nfs_version: 4.1
+        port: 2049
 
   # =============================================================================
   # Transport extensions, negative tests, parity (proto-blocked ops skip)
@@ -329,6 +335,8 @@ tests:
         operation: verify_admin_auth_matrix
         blocked: true
         skip_if_blocked: true
+        deploy_grpc_certs: true
+        grpc_cert_source: /root/certs
         nfs_name: cephfs-nfs
         nfs_export: /export
         clients: 1

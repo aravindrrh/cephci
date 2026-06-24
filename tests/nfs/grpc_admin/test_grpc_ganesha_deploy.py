@@ -6,6 +6,7 @@ Run early in gRPC suites (after bootstrap, before NFS cluster create).
 Operations:
     set_nfs_image — apply ``nfs_container_image`` via mgr config
     verify_grpc_bootstrap — post-NFS-deploy gRPC port + discovery smoke
+    deploy_grpc_certs — copy ``/root/certs`` into cephadm NFS instance cert path
 """
 
 from cli.exceptions import ConfigError, OperationFailedError
@@ -18,6 +19,8 @@ from tests.nfs.grpc_admin.grpc_client import (
 )
 from tests.nfs.grpc_admin.grpc_deploy import (
     apply_nfs_container_image,
+    copy_grpc_certs_to_nfs_instances,
+    deploy_grpc_certs_if_configured,
     resolve_nfs_container_image,
     verify_grpc_in_nfs_pod,
 )
@@ -46,6 +49,30 @@ def run(ceph_cluster, **kw):
             )
             return 0
         apply_nfs_container_image(installer, image)
+        return 0
+
+    if operation == "deploy_grpc_certs":
+        nfs_nodes = ceph_cluster.get_nodes("nfs")
+        if not nfs_nodes:
+            raise OperationFailedError("No NFS nodes available for cert deploy")
+        nfs_node = nfs_nodes[0]
+        nfs_name = config.get("nfs_name", "cephfs-nfs")
+        source = config.get("grpc_cert_source", "/root/certs")
+        restart = config.get("restart_nfs_after_cert_copy", True)
+        if not copy_grpc_certs_to_nfs_instances(
+            nfs_node,
+            nfs_name,
+            cert_source=source,
+            restart_nfs=restart,
+            installer=installer,
+            restart_sleep=int(config.get("cert_copy_restart_sleep", 15)),
+        ):
+            log.info(
+                "No certs copied — create %s on %s before running this step",
+                source,
+                nfs_node.hostname,
+            )
+            return -1
         return 0
 
     if operation == "verify_grpc_bootstrap":
@@ -80,6 +107,7 @@ def run(ceph_cluster, **kw):
                 fs=fs,
                 ceph_cluster=ceph_cluster,
             )
+            deploy_grpc_certs_if_configured(config, nfs_node, nfs_name, installer)
             target = resolve_grpc_target(config, nfs_ip)
             if not verify_grpc_in_nfs_pod(nfs_node, client, nfs_ip):
                 raise OperationFailedError(
