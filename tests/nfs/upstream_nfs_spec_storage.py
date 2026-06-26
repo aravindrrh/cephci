@@ -12,6 +12,12 @@ from utility.log import Log
 
 log = Log(__name__)
 
+# SPECstorage 2020 workloads used in this suite (see cli/io/spec_storage.py):
+#   SWBUILD  — software build (many small files)
+#   VDA      — virtual desktop (VDI-like)
+#   AI_IMAGE — AI/deep-learning image training
+DEFAULT_BENCHMARKS = ("SWBUILD", "VDA", "AI_IMAGE")
+
 # Defaults from nfs_downstream_regression tier-2_nfs_ganesha_spec_storage.yaml
 DEFAULT_BENCHMARK_DEFINATION = {
     "Warmup_time": 30,
@@ -20,6 +26,28 @@ DEFAULT_BENCHMARK_DEFINATION = {
     "File_size": "3k",
     "Instances": 4,
 }
+
+
+def _resolve_benchmarks(config):
+    """Return workload list from config ``benchmark`` (str or list)."""
+    benchmark = config.get("benchmark")
+    if benchmark is None:
+        # backward compat
+        legacy = config.get("benchmarks")
+        if legacy:
+            return list(legacy) if isinstance(legacy, (list, tuple)) else [legacy]
+        return list(DEFAULT_BENCHMARKS)
+    if isinstance(benchmark, (list, tuple)):
+        return list(benchmark)
+    return [benchmark]
+
+
+def _benchmark_defination_for(config, benchmark):
+    """Per-workload overrides, else suite-wide benchmark_defination, else defaults."""
+    per_benchmark = (config.get("benchmark_definations") or {}).get(benchmark)
+    if per_benchmark:
+        return per_benchmark
+    return config.get("benchmark_defination") or DEFAULT_BENCHMARK_DEFINATION
 
 
 def _setup_spec_storage_ssh(primary_client, clients):
@@ -43,8 +71,7 @@ def run(ceph_cluster, **kw):
     clients = clients_all[:no_clients]
     primary_client = clients[0]
 
-    benchmark = config.get("benchmark", "SWBUILD")
-    benchmark_defination = config.get("benchmark_defination") or DEFAULT_BENCHMARK_DEFINATION
+    benchmarks = _resolve_benchmarks(config)
     load = config.get("load", "1")
     incr_load = config.get("incr_load", "1")
     num_runs = config.get("num_runs", "1")
@@ -61,21 +88,28 @@ def run(ceph_cluster, **kw):
         _setup_spec_storage_ssh(primary_client, clients)
 
         log.info(
-            "Run SPECstorage with %s benchmark on %s (clients=%d)",
-            benchmark,
-            nfs_mount,
-            len(clients),
+            "SPECstorage workloads (single mount, no remount between runs): %s",
+            benchmarks,
         )
-        SpecStorage(primary_client).run_spec_storage(
-            benchmark,
-            load,
-            incr_load,
-            num_runs,
-            clients,
-            nfs_mount,
-            benchmark_defination,
-        )
-        log.info("SPECstorage run completed")
+        spec_storage = SpecStorage(primary_client)
+        for benchmark in benchmarks:
+            benchmark_defination = _benchmark_defination_for(config, benchmark)
+            log.info(
+                "Run SPECstorage with %s benchmark on %s (clients=%d)",
+                benchmark,
+                nfs_mount,
+                len(clients),
+            )
+            spec_storage.run_spec_storage(
+                benchmark,
+                load,
+                incr_load,
+                num_runs,
+                clients,
+                nfs_mount,
+                benchmark_defination,
+            )
+            log.info("SPECstorage %s run completed", benchmark)
         return 0
     except OperationFailedError:
         raise
