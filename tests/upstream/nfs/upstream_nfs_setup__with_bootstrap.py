@@ -38,7 +38,7 @@ def run(ceph_cluster, **kw):
     # Install required packages
     cmds = ['dnf -y install centos-release-ceph epel-release',
             'yum install -y sshpass git bison cmake dbus-devel flex gcc-c++ krb5-devel libacl-devel libblkid-devel '
-            'libcap-devel redhat-rpm-config rpm-build xfsprogs-devel',
+            'libcap-devel redhat-rpm-config rpm-build xfsprogs-devel openssl-devel',
             'yum install --enablerepo=crb -y libnsl2-devel libnfsidmap-devel libwbclient-devel userspace-rcu-devel',
             'yum install -y libcephfs-devel',
             'rm -rf nfs-ganesha']
