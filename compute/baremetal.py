@@ -57,22 +57,26 @@ class CephBaremetalNode:
 
         self.rssh = self.root_connection.get_client
 
-        # Check if user exists
+        # Check if user exists (username/password from conf; defaults match OpenStack images)
+        user = self.username
         try:
             _, out, err = self.rssh().exec_command(
-                command="id -u cephuser",
+                command=f"id -u {user}",
             )
 
             if err.readLines():
                 LOG.debug(err.readLines())
-                self._create_user(name="cephuser")
+                self._create_user(name=user)
             else:
-                LOG.debug("Reusing existing user account of cephuser.")
+                LOG.debug("Reusing existing user account of %s.", user)
         except BaseException:  # noqa
-            self._create_user(name="cephuser")
+            self._create_user(name=user)
+
+        # Onecloud (and similar) reject weak defaults like 'passwd' / 'cephuser'.
+        self._set_user_password(user, self.password)
 
         self.rssh().exec_command(
-            'echo "cephuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/cephuser'
+            f'echo "{user} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/{user}'
         )
         self.rssh().exec_command(command="touch /ceph-qa-ready")
 
@@ -88,9 +92,7 @@ class CephBaremetalNode:
         """
         LOG.info(f"Creating user account with {name} ...")
 
-        self.rssh().exec_command(
-            command=f"useradd {name} -p '$1$1fsNAJ7G$bx4Sz9VnpOnIygVKVaGCT.'"
-        )
+        self.rssh().exec_command(command=f"useradd {name}")
 
         key_file = "~/.ssh/authorized_keys"
         create_dir = f"install -d -m 700  -o {name} -g {name} /home/{name}/.ssh"
@@ -98,6 +100,11 @@ class CephBaremetalNode:
         bash_script = f"if [ -f {key_file} ] ; then {create_dir}; {copy_file} ; fi"
         self.rssh().exec_command(command=f"chown {name}:{name} /home/{name}")
         self.rssh().exec_command(command=bash_script)
+
+    def _set_user_password(self, name: str, password: str) -> None:
+        """Set the login password for the given user via root."""
+        LOG.info("Setting password for user %s", name)
+        self.rssh().exec_command(command=f"echo '{name}:{password}' | chpasswd")
 
     @property
     def ip_address(self) -> str:
@@ -112,6 +119,16 @@ class CephBaremetalNode:
     def hostname(self) -> str:
         """Return the hostname of the VM."""
         return self.params.get("hostname")
+
+    @property
+    def username(self) -> str:
+        """Return the non-root username used by cephci (default cephuser)."""
+        return self.params.get("username", "cephuser")
+
+    @property
+    def password(self) -> str:
+        """Return the non-root user password (default cephuser)."""
+        return self.params.get("password", "cephuser")
 
     @property
     def root_password(self) -> str:

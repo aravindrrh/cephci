@@ -101,6 +101,8 @@ def create_baremetal_ceph_nodes(cluster_conf):
                 {
                     "ip": node.get("ip"),
                     "hostname": node.get("hostname"),
+                    "username": node.get("username", "cephuser"),
+                    "password": node.get("password", "cephuser"),
                     "root_password": node.get("root_password"),
                     "root_private_key": node.get("root_private_key"),
                     "role": RolesContainer(node.get("role")),

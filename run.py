@@ -207,9 +207,13 @@ def create_nodes(
 
         ceph_nodes = []
         root_password = None
+        username = "cephuser"
+        password = "cephuser"
         for node in ceph_vmnodes.values():
             look_for_key = False
             private_key_path = ""
+            username = "cephuser"
+            password = "cephuser"
 
             if cloud_type == "openstack":
                 private_ip = node.get_private_ip()
@@ -219,6 +223,9 @@ def create_nodes(
                 private_ip = node.ip_address
                 look_for_key = True if node.private_key else False
                 root_password = node.root_password
+                # Allow Onecloud/static confs to override weak default passwords.
+                username = getattr(node, "username", None) or "cephuser"
+                password = getattr(node, "password", None) or "cephuser"
                 ceph_nodename = node.hostname
             elif cloud_type == "ibmc":
                 glbs = osp_cred.get("globals")
@@ -234,8 +241,8 @@ def create_nodes(
                 )
             else:
                 ceph = CephNode(
-                    username="cephuser",
-                    password="cephuser",
+                    username=username,
+                    password=password,
                     root_password="passwd" if not root_password else root_password,
                     look_for_key=look_for_key,
                     private_key_path=private_key_path,

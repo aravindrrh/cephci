@@ -103,6 +103,44 @@ def install_deploy_prereq_packages(nodes):
         node.exec_command(cmd=cmd, sudo=True)
 
 
+def ensure_rpcbind_running(nodes):
+    """
+    Unmask and start rpcbind before Scale/Ganesha install.
+
+    Ganesha bring-up fails if rpcbind is masked or inactive on the node.
+    Raises OperationFailedError if rpcbind is not active after start.
+    """
+    log.info("Ensuring rpcbind is unmasked and active on all nodes")
+    setup_cmds = [
+        "systemctl unmask rpcbind",
+        "systemctl unmask rpcbind.socket",
+        "systemctl enable rpcbind",
+        "systemctl start rpcbind",
+    ]
+    for node in nodes:
+        for cmd in setup_cmds:
+            log.info("[%s] %s", node.hostname, cmd)
+            node.exec_command(cmd=cmd, sudo=True, long_running=True)
+
+        # Fail deploy early if rpcbind did not come up (Ganesha will fail later).
+        out, err = node.exec_command(
+            cmd="systemctl is-active rpcbind", sudo=True, check_ec=False
+        )
+        state = (out or "").strip()
+        log.info("[%s] rpcbind is-active: %s", node.hostname, state)
+        if state != "active":
+            node.exec_command(
+                cmd="systemctl status rpcbind --no-pager || true",
+                sudo=True,
+                long_running=True,
+                check_ec=False,
+            )
+            raise OperationFailedError(
+                f"rpcbind is not active on {node.hostname} (state={state!r}); "
+                f"stderr={err}"
+            )
+
+
 def deploy_gpfs_scale(ceph_cluster, config=None):
     """
     Deploy multi-node IBM Spectrum Scale / NFS via ci-tests on the installer.
@@ -132,6 +170,8 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
     add_etc_host_entries(nodes)
     install_deploy_prereq_packages(nodes)
     setup_passwordless_ssh(nodes)
+    # rpcbind must be up before Ganesha starts inside the multi-node script.
+    ensure_rpcbind_running(nodes)
 
     server_cmds = [
         "rm -rf ci-tests/",
@@ -348,3 +388,157 @@ def teardown_gpfs_nfs(clients, nfs_mount):
         if w.expired:
             log.error("Timeout clearing %s on %s", nfs_mount, client.hostname)
         cleanup_nfs_mount_on_node(client, nfs_mount, remove_mount_dir=True)
+
+
+# Paths left by basic-storage-scale-multi-node.sh and related upstream tests.
+DEFAULT_SCALE_FS = "scale_volume"
+MMFS_BIN = "/usr/lpp/mmfs/bin"
+CLEANUP_CLONE_DIRS = (
+    "ci-tests",
+    "nfs-ganesha",
+    "DOWNLOAD_STORAGE_SCALE",
+    "/root/ci-tests",
+    "/root/nfs-ganesha",
+    "/root/nfstest",
+    "/root/DOWNLOAD_STORAGE_SCALE",
+)
+CLEANUP_RESIDUAL_DIRS = (
+    "/var/mmfs",
+    "/usr/lpp/mmfs",
+    "/tmp/mmfs",
+)
+GANESHA_RPM_GREP = r"^(nfs-ganesha|libntirpc|gpfs\.nfs-ganesha)"
+SCALE_RPM_GREP = r"^(gpfs|spectrum)"
+
+
+def _best_effort(node, cmd, timeout=600):
+    """Run a command and log failures without raising (teardown must keep going)."""
+    host = getattr(node, "hostname", str(node))
+    try:
+        log.info("[%s] %s", host, cmd)
+        node.exec_command(
+            cmd=cmd,
+            sudo=True,
+            long_running=True,
+            timeout=timeout,
+            check_ec=False,
+        )
+    except Exception as exc:
+        log.warning("[%s] best-effort failed (%s): %s", host, cmd, exc)
+
+
+def _mm_cmd(cmd):
+    """Prefix Scale CLI with PATH so mm* tools resolve after install."""
+    return f"bash -lc 'export PATH=\"$PATH:{MMFS_BIN}\"; {cmd}'"
+
+
+def _stop_nfs_ganesha_stack(nodes, timeout=600):
+    """Stop nfs-ganesha and CES NFS on every node (installer first)."""
+    for node in nodes:
+        for cmd in (
+            "systemctl stop nfs-ganesha || true",
+            "systemctl disable nfs-ganesha || true",
+            _mm_cmd(f"{MMFS_BIN}/mmces service stop nfs || true"),
+            _mm_cmd(f"{MMFS_BIN}/mmces service disable nfs --force || true"),
+        ):
+            _best_effort(node, cmd, timeout=timeout)
+
+
+def _teardown_scale_cluster(installer, scale_fs, timeout=600):
+    """
+    Unmount FS, delete filesystem/NSDs, and shut down GPFS on the cluster.
+
+    Cluster-wide mm* commands are issued from the installer node.
+    """
+    cmds = [
+        _mm_cmd(f"{MMFS_BIN}/mmumount all -a || true"),
+        # Force-delete the test FS created by the multi-node deploy script.
+        _mm_cmd(f"{MMFS_BIN}/mmdelfs {scale_fs} -p || true"),
+        _mm_cmd(f"{MMFS_BIN}/mmdelfs {scale_fs} -f || true"),
+        # Drop remaining NSDs so a later deploy can recreate file-backed disks.
+        _mm_cmd(
+            f"for nsd in $({MMFS_BIN}/mmlsnsd -L 2>/dev/null | "
+            f"awk '/nsd/ {{print $1}}'); do "
+            f"{MMFS_BIN}/mmdelnsd $nsd -f || true; done"
+        ),
+        _mm_cmd(f"{MMFS_BIN}/mmshutdown -a || true"),
+    ]
+    for cmd in cmds:
+        _best_effort(installer, cmd, timeout=timeout)
+
+
+def _remove_rpms_matching(node, pattern, timeout=600):
+    """Remove RPMs whose names match egrep pattern (nodeps for stuck deps)."""
+    cmd = (
+        f"bash -lc \"pkgs=$(rpm -qa | grep -E '{pattern}' || true); "
+        f'if [ -n \\"$pkgs\\" ]; then rpm -e --nodeps $pkgs || true; fi"'
+    )
+    _best_effort(node, cmd, timeout=timeout)
+
+
+def _remove_cleanup_dirs(node, timeout=600):
+    """Remove git clones, Scale download tree, NSD files, and residual Scale dirs."""
+    paths = " ".join(CLEANUP_CLONE_DIRS + CLEANUP_RESIDUAL_DIRS)
+    _best_effort(
+        node,
+        f"bash -lc 'rm -rf {paths} /home/nsd1_* /root/nsd1_* 2>/dev/null || true'",
+        timeout=timeout,
+    )
+    # Scale leaves ras logs even after package removal.
+    _best_effort(
+        node,
+        "bash -lc 'rm -rf /var/adm/ras/* 2>/dev/null || true'",
+        timeout=timeout,
+    )
+
+
+def _strip_deploy_bashrc_exports(installer):
+    """Remove node2/node3 exports appended by deploy_gpfs_scale."""
+    _best_effort(
+        installer,
+        "bash -lc \"sed -i '/^export node2=/d; /^export node3=/d' ~/.bashrc || true\"",
+    )
+
+
+def uninstall_gpfs_scale(ceph_cluster, config=None):
+    """
+    Tear down multi-node Spectrum Scale / NFS so static nodes can be redeployed.
+
+    Reverses artifacts from deploy_gpfs_scale / basic-storage-scale-multi-node.sh:
+    client mounts, Ganesha/CES, Scale FS/cluster, Ganesha+Scale RPMs, clones/dirs.
+
+    Config keys:
+        scale_fs: GPFS filesystem name (default scale_volume)
+        nfs_export: unused for uninstall path; kept for suite config symmetry
+        cleanup_timeout: per-command timeout seconds (default 600)
+    """
+    conf = config or {}
+    scale_fs = conf.get("scale_fs", DEFAULT_SCALE_FS)
+    timeout = int(conf.get("cleanup_timeout", 600))
+
+    installer = ceph_cluster.get_nodes("installer")[0]
+    # Scale is installed on installer + both clients (NODE2/NODE3 in the script).
+    nodes = ceph_cluster.get_nodes()
+    # Installer first so cluster-wide mm* commands prefer the quorum node.
+    ordered = [installer] + [n for n in nodes if n != installer]
+
+    log.info(
+        "Uninstalling Spectrum Scale / NFS on %d node(s) (installer=%s fs=%s)",
+        len(ordered),
+        installer.hostname,
+        scale_fs,
+    )
+
+    run_suite_cleanup(ceph_cluster, conf)
+    _stop_nfs_ganesha_stack(ordered, timeout=timeout)
+    _teardown_scale_cluster(installer, scale_fs, timeout=timeout)
+
+    for node in ordered:
+        _remove_rpms_matching(node, GANESHA_RPM_GREP, timeout=timeout)
+        _remove_rpms_matching(node, SCALE_RPM_GREP, timeout=timeout)
+        _remove_cleanup_dirs(node, timeout=timeout)
+
+    _strip_deploy_bashrc_exports(installer)
+
+    log.info("Spectrum Scale / NFS uninstall completed (best-effort)")
+    return {"installer": installer, "nodes": ordered, "scale_fs": scale_fs}
