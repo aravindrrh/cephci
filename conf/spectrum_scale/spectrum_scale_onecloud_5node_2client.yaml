@@ -1,0 +1,64 @@
+globals:
+  -
+    ceph-cluster:
+      name: ceph
+      networks:
+        public: ['9.0.0.0/8']
+      nodes:
+        -
+          hostname: Scale-Test-node-0
+          id: node1
+          ip: 9.114.200.249
+          username: cephuser
+          password: W3lcome@passwd
+          root_password: W3lcome@passwd
+          role:
+            # No 'osd' here: baremetal/static nodes need volumes/no-of-volumes
+            # for each osd role. Spectrum Scale suites only need installer + clients.
+            - _admin
+            - installer
+            - mon
+            - mgr
+            - node-exporter
+            - alertmanager
+            - grafana
+            - prometheus
+            - crash
+        -
+          hostname: Scale-Test-node-1
+          id: node2
+          ip: 9.114.200.253
+          username: cephuser
+          password: W3lcome@passwd
+          root_password: W3lcome@passwd
+          role:
+            - mon
+            - mgr
+        -
+          hostname: Scale-Test-node-3
+          id: node3
+          ip: 9.114.200.75
+          username: cephuser
+          password: W3lcome@passwd
+          root_password: W3lcome@passwd
+          role:
+            - mon
+            - mgr
+        -
+          hostname: Scale-Test-node-4
+          id: node4
+          ip: 9.114.201.101
+          username: cephuser
+          password: W3lcome@passwd
+          root_password: W3lcome@passwd
+          role:
+            - client
+        -
+          hostname: Scale-Test-node-5
+          id: node5
+          ip: 9.114.61.159
+          username: cephuser
+          password: W3lcome@passwd
+          root_password: W3lcome@passwd
+          role:
+            - client
