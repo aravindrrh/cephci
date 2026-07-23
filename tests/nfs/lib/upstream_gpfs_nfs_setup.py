@@ -143,33 +143,51 @@ def ensure_rpcbind_running(nodes):
 
 def deploy_gpfs_scale(ceph_cluster, config=None):
     """
-    Deploy multi-node IBM Spectrum Scale / NFS via ci-tests on the installer.
+    Deploy Spectrum Scale + NFS-Ganesha via CephCI Python stages.
 
-    Expects installer + at least two client nodes (node2/node3 hostnames are
-    exported for basic-storage-scale-multi-node.sh).
+    Stages:
+      1. deploy_spectrum_scale (mgr nodes; installer runs spectrumscale)
+      2. build_install_ganesha (node with role ``nfs``)
+      3. create_nfs_export
+
+    Role model:
+      - mgr: Scale cluster members
+      - nfs: Ganesha node
+      - client: NFS test clients
 
     Config keys:
-        ci_tests_branch: git branch (default scale_downstream)
         deploy_timeout: per-command timeout in seconds (default 7200)
         cloud-type: from run.py ``--cloud``; if baremetal, skip /etc/hosts
-            and passwordless SSH setup (already present on static hosts)
+            and passwordless SSH setup
+        skip_scale / skip_ganesha / skip_export: skip individual stages
+        gerrit_host / gerrit_project / gerrit_refspec (or ganesha_repo /
+            ganesha_branch): Ganesha source location
+        scale_fs, ces_ip, scale_installer_source: see scale_deploy.py
+        use_ci_tests_script: if true, fall back to legacy shell script path
     """
+    from tests.nfs.lib.nfs_ganesha_deploy import (
+        build_install_ganesha,
+        create_nfs_export,
+        resolve_ganesha_node,
+    )
+    from tests.nfs.lib.scale_deploy import deploy_spectrum_scale, resolve_scale_roles
+
     conf = config or {}
-    branch = conf.get("ci_tests_branch", DEFAULT_CI_TESTS_BRANCH)
     timeout = int(conf.get("deploy_timeout", 7200))
-
-    server = ceph_cluster.get_nodes("installer")[0]
-    clients = ceph_cluster.get_nodes("client")
-    if len(clients) < 2:
-        raise ConfigError(
-            "Multi-node Spectrum Scale deploy requires at least two client nodes"
-        )
-
-    node2 = clients[0].hostname
-    node3 = clients[1].hostname
     nodes = ceph_cluster.get_nodes()
 
-    # run.py injects config["cloud-type"] from --cloud; fall back to node type.
+    # Legacy escape hatch: keep old ci-tests shell path if explicitly requested.
+    if conf.get("use_ci_tests_script"):
+        return _deploy_gpfs_scale_via_ci_tests(ceph_cluster, conf)
+
+    roles = resolve_scale_roles(ceph_cluster)
+    installer = roles["installer"]
+    clients = roles["nfs_clients"]
+    if len(clients) < 1:
+        raise ConfigError(
+            "Upstream Scale NFS deploy requires at least one node with role 'client'"
+        )
+
     cloud_type = str(conf.get("cloud-type", "")).lower()
     is_baremetal = "baremetal" in cloud_type or any(
         getattr(getattr(n, "vm_node", None), "node_type", "") == "baremetal"
@@ -177,8 +195,6 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
     )
 
     if is_baremetal:
-        # Static hosts already have /etc/hosts and passwordless SSH; re-running
-        # these duplicates host entries and is unnecessary.
         log.info(
             "cloud-type=%s — skipping /etc/hosts and passwordless SSH setup",
             cloud_type or "baremetal",
@@ -188,7 +204,71 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
         setup_passwordless_ssh(nodes)
 
     install_deploy_prereq_packages(nodes)
-    # rpcbind must be up before Ganesha starts inside the multi-node script.
+    # Include Ganesha node explicitly (may differ from mgr set in odd layouts).
+    ganesha_node = resolve_ganesha_node(ceph_cluster)
+    rpcbind_nodes = list(
+        {id(n): n for n in (roles["scale_nodes"] + [ganesha_node])}.values()
+    )
+    ensure_rpcbind_running(rpcbind_nodes)
+
+    result = {
+        "server": installer,
+        "installer": installer,
+        "scale_nodes": roles["scale_nodes"],
+        "nfs_clients": clients,
+        "ganesha_node": ganesha_node,
+    }
+
+    if not conf.get("skip_scale"):
+        scale_info = deploy_spectrum_scale(ceph_cluster, conf)
+        result.update(scale_info)
+    else:
+        log.info("skip_scale set — skipping Spectrum Scale deploy")
+
+    if not conf.get("skip_ganesha"):
+        ganesha_info = build_install_ganesha(ceph_cluster, conf)
+        result.update(ganesha_info)
+    else:
+        log.info("skip_ganesha set — skipping NFS-Ganesha build/install")
+
+    if not conf.get("skip_export"):
+        export_info = create_nfs_export(ceph_cluster, conf)
+        result.update(export_info)
+    else:
+        log.info("skip_export set — skipping NFS export create")
+
+    log.info(
+        "Multi-node Spectrum Scale / NFS deployment completed "
+        "(installer=%s clients=%s timeout=%s)",
+        installer.hostname,
+        [c.hostname for c in clients],
+        timeout,
+    )
+    return result
+
+
+def _deploy_gpfs_scale_via_ci_tests(ceph_cluster, conf):
+    """Legacy path: clone ci-tests and run basic-storage-scale-multi-node.sh."""
+    branch = conf.get("ci_tests_branch", DEFAULT_CI_TESTS_BRANCH)
+    timeout = int(conf.get("deploy_timeout", 7200))
+    server = ceph_cluster.get_nodes("installer")[0]
+    clients = ceph_cluster.get_nodes("client")
+    if len(clients) < 2:
+        raise ConfigError(
+            "Legacy ci-tests Scale deploy requires at least two client nodes"
+        )
+    node2, node3 = clients[0].hostname, clients[1].hostname
+    nodes = ceph_cluster.get_nodes()
+
+    cloud_type = str(conf.get("cloud-type", "")).lower()
+    is_baremetal = "baremetal" in cloud_type or any(
+        getattr(getattr(n, "vm_node", None), "node_type", "") == "baremetal"
+        for n in nodes
+    )
+    if not is_baremetal:
+        add_etc_host_entries(nodes)
+        setup_passwordless_ssh(nodes)
+    install_deploy_prereq_packages(nodes)
     ensure_rpcbind_running(nodes)
 
     server_cmds = [
@@ -199,14 +279,11 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
         f"git clone {CI_TESTS_REPO}; cd ci-tests; git checkout {branch}",
         MULTI_NODE_SCALE_SCRIPT,
     ]
-
     log.info(
-        "Deploying multi-node Spectrum Scale / NFS on installer %s "
-        "(node2=%s node3=%s branch=%s)",
+        "Legacy ci-tests Scale deploy on %s (node2=%s node3=%s)",
         server.hostname,
         node2,
         node3,
-        branch,
     )
     for cmd in server_cmds:
         rc = server.exec_command(cmd=cmd, sudo=True, long_running=True, timeout=timeout)
@@ -214,8 +291,6 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
             raise OperationFailedError(
                 f"GPFS multi-node deploy command failed (exit {rc}): {cmd}"
             )
-
-    log.info("Multi-node Spectrum Scale / NFS deployment completed")
     return {"server": server, "node2": node2, "node3": node3}
 
 
@@ -422,11 +497,16 @@ CLEANUP_CLONE_DIRS = (
     "/root/DOWNLOAD_STORAGE_SCALE",
     "/root/rpmbuild",
 )
-# Deploy artifacts on the installer/_admin node (cwd is often /root or /home/cephuser).
+# Deploy artifacts on the installer/_admin node (prefer absolute /root paths).
 ADMIN_CLEANUP_DIRS = (
+    "/root/DOWNLOAD_STORAGE_SCALE",
+    "/root/nfs-ganesha",
+    "/root/rpmbuild",
+    "/root/ci-tests",
     "DOWNLOAD_STORAGE_SCALE",
     "ci-tests",
     "rpmbuild",
+    "nfs-ganesha",
 )
 CLEANUP_RESIDUAL_DIRS = (
     "/var/mmfs",

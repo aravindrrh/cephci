@@ -3,9 +3,16 @@ Spectrum Scale / NFS deployment stage for upstream GPFS test suites.
 
 Run this module as the **first** test in a suite so multi-node deploy runs once.
 Later modules should set ``skip_deployment: true`` in config (or SKIP_DEPLOYMENT).
+
+Python stages (see tests/nfs/lib/scale_deploy.py and nfs_ganesha_deploy.py):
+  mgr nodes  -> Scale cluster
+  nfs node   -> Ganesha build/install + export
+  client     -> NFS test clients
 """
 
 from cli.exceptions import ConfigError
+from tests.nfs.lib.nfs_ganesha_deploy import resolve_ganesha_node
+from tests.nfs.lib.scale_deploy import resolve_scale_roles
 from tests.nfs.lib.upstream_gpfs_nfs_setup import deploy_gpfs_scale, should_skip_deployment
 from utility.log import Log
 
@@ -19,8 +26,12 @@ def run(ceph_cluster, **kw):
     no_clients = int(config.get("clients", "2"))
     if no_clients > len(clients_all):
         raise ConfigError("The test requires more clients than available")
-    if len(clients_all) < 2:
-        raise ConfigError("Multi-node deploy requires at least two client nodes")
+    if len(clients_all) < 1:
+        raise ConfigError("Upstream Scale NFS deploy requires at least one client node")
+
+    # Validate role model early (mgr + nfs + installer).
+    resolve_scale_roles(ceph_cluster)
+    resolve_ganesha_node(ceph_cluster)
 
     if should_skip_deployment(config):
         log.info("skip_deployment set — deployment stage skipped")

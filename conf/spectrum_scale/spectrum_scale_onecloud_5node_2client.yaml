@@ -24,6 +24,7 @@ globals:
             - grafana
             - prometheus
             - crash
+            - nfs
         -
           hostname: Scale-Test-node-1
           id: node2

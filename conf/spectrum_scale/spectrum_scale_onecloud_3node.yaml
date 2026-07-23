@@ -1,0 +1,40 @@
+globals:
+  -
+    ceph-cluster:
+      name: ceph
+      networks:
+        public: ['9.0.0.0/8']
+      nodes:
+        -
+          hostname: ci-8NMCHM-node1
+          id: node1
+          ip: 9.114.194.225
+          username: cephuser
+
+          role:
+            # No 'osd' here: baremetal/static nodes need volumes/no-of-volumes
+            # for each osd role. Spectrum Scale suites only need installer + clients.
+            - _admin
+            - installer
+            - mon
+            - mgr
+            - node-exporter
+            - alertmanager
+            - grafana
+            - prometheus
+            - crash
+            - nfs
+        -
+          hostname: ci-8NMCHM-node2
+          id: node2
+          ip: 9.114.194.240
+          username: cephuser
+          role:
+            - client
+        -
+          hostname: ci-8NMCHM-node3
+          id: node3
+          ip: 9.114.194.30
+          username: cephuser
+          role:
+            - client
