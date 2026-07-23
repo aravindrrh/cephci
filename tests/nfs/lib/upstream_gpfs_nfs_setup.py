@@ -151,6 +151,8 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
     Config keys:
         ci_tests_branch: git branch (default scale_downstream)
         deploy_timeout: per-command timeout in seconds (default 7200)
+        cloud-type: from run.py ``--cloud``; if baremetal, skip /etc/hosts
+            and passwordless SSH setup (already present on static hosts)
     """
     conf = config or {}
     branch = conf.get("ci_tests_branch", DEFAULT_CI_TESTS_BRANCH)
@@ -167,9 +169,25 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
     node3 = clients[1].hostname
     nodes = ceph_cluster.get_nodes()
 
-    add_etc_host_entries(nodes)
+    # run.py injects config["cloud-type"] from --cloud; fall back to node type.
+    cloud_type = str(conf.get("cloud-type", "")).lower()
+    is_baremetal = "baremetal" in cloud_type or any(
+        getattr(getattr(n, "vm_node", None), "node_type", "") == "baremetal"
+        for n in nodes
+    )
+
+    if is_baremetal:
+        # Static hosts already have /etc/hosts and passwordless SSH; re-running
+        # these duplicates host entries and is unnecessary.
+        log.info(
+            "cloud-type=%s — skipping /etc/hosts and passwordless SSH setup",
+            cloud_type or "baremetal",
+        )
+    else:
+        add_etc_host_entries(nodes)
+        setup_passwordless_ssh(nodes)
+
     install_deploy_prereq_packages(nodes)
-    setup_passwordless_ssh(nodes)
     # rpcbind must be up before Ganesha starts inside the multi-node script.
     ensure_rpcbind_running(nodes)
 
@@ -500,12 +518,27 @@ def _strip_deploy_bashrc_exports(installer):
     )
 
 
+def _remove_cesip_hosts_entries(installer):
+    """
+    Remove CES IP host aliases from /etc/hosts on the admin/installer node.
+
+    basic-storage-scale-multi-node.sh appends lines like: ``<ip>    cesip1``.
+    """
+    _best_effort(
+        installer,
+        # Match cesip / cesip1 / cesipN as a whole hostname token.
+        "bash -lc \"sed -i -E '/[[:space:]]cesip[0-9]*([[:space:]]|$)/d' "
+        '/etc/hosts || true"',
+    )
+
+
 def uninstall_gpfs_scale(ceph_cluster, config=None):
     """
     Tear down multi-node Spectrum Scale / NFS so static nodes can be redeployed.
 
     Reverses artifacts from deploy_gpfs_scale / basic-storage-scale-multi-node.sh:
-    client mounts, Ganesha/CES, Scale FS/cluster, Ganesha+Scale RPMs, clones/dirs.
+    client mounts, Ganesha/CES, Scale FS/cluster, Ganesha+Scale RPMs, clones/dirs,
+    and cesip* entries in installer /etc/hosts.
 
     Config keys:
         scale_fs: GPFS filesystem name (default scale_volume)
@@ -539,6 +572,7 @@ def uninstall_gpfs_scale(ceph_cluster, config=None):
         _remove_cleanup_dirs(node, timeout=timeout)
 
     _strip_deploy_bashrc_exports(installer)
+    _remove_cesip_hosts_entries(installer)
 
     log.info("Spectrum Scale / NFS uninstall completed (best-effort)")
     return {"installer": installer, "nodes": ordered, "scale_fs": scale_fs}
