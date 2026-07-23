@@ -415,10 +415,18 @@ CLEANUP_CLONE_DIRS = (
     "ci-tests",
     "nfs-ganesha",
     "DOWNLOAD_STORAGE_SCALE",
+    "rpmbuild",
     "/root/ci-tests",
     "/root/nfs-ganesha",
     "/root/nfstest",
     "/root/DOWNLOAD_STORAGE_SCALE",
+    "/root/rpmbuild",
+)
+# Deploy artifacts on the installer/_admin node (cwd is often /root or /home/cephuser).
+ADMIN_CLEANUP_DIRS = (
+    "DOWNLOAD_STORAGE_SCALE",
+    "ci-tests",
+    "rpmbuild",
 )
 CLEANUP_RESIDUAL_DIRS = (
     "/var/mmfs",
@@ -510,6 +518,31 @@ def _remove_cleanup_dirs(node, timeout=600):
     )
 
 
+def _remove_admin_deploy_dirs(installer, timeout=600):
+    """
+    Remove Scale/NFS deploy workdirs from the installer (_admin) node.
+
+    Targets DOWNLOAD_STORAGE_SCALE, ci-tests, and rpmbuild under /root and
+    /home/cephuser (deploy may have run as either).
+    """
+    names = " ".join(ADMIN_CLEANUP_DIRS)
+    log.info(
+        "Removing admin deploy dirs on %s: %s",
+        installer.hostname,
+        ", ".join(ADMIN_CLEANUP_DIRS),
+    )
+    _best_effort(
+        installer,
+        "bash -lc '"
+        f"for d in {names}; do "
+        "rm -rf \"$d\" \"/root/$d\" \"/home/cephuser/$d\" "
+        "\"$HOME/$d\" 2>/dev/null || true; "
+        "done"
+        "'",
+        timeout=timeout,
+    )
+
+
 def _strip_deploy_bashrc_exports(installer):
     """Remove node2/node3 exports appended by deploy_gpfs_scale."""
     _best_effort(
@@ -571,6 +604,8 @@ def uninstall_gpfs_scale(ceph_cluster, config=None):
         _remove_rpms_matching(node, SCALE_RPM_GREP, timeout=timeout)
         _remove_cleanup_dirs(node, timeout=timeout)
 
+    # Installer/_admin: explicitly wipe Scale download, ci-tests clone, rpmbuild.
+    _remove_admin_deploy_dirs(installer, timeout=timeout)
     _strip_deploy_bashrc_exports(installer)
     _remove_cesip_hosts_entries(installer)
 
