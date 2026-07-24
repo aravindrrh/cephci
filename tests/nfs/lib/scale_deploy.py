@@ -10,6 +10,7 @@ Role model (static Onecloud confs):
 Orchestration is Python; remote work uses exec_command for CLI tools.
 """
 
+import re
 import shlex
 
 from cli.exceptions import ConfigError, OperationFailedError
@@ -24,6 +25,8 @@ DEFAULT_S3_BUCKET = "centos-ci"
 DEFAULT_VERSION_KEY = "version_to_use.txt"
 DEFAULT_NSD_FILE = "/home/nsd1_scale_filedisk"
 DEFAULT_NSD_SIZE_MB = 8192
+# Written when deploy reuses an existing Scale cluster (same VERSION_TO_USE).
+SCALE_REUSE_MARKER = "/root/.cephci_scale_reuse"
 
 SCALE_PREREQ_PACKAGES = (
     "unzip kernel-devel-$(uname -r) kernel-headers-$(uname -r) "
@@ -31,6 +34,9 @@ SCALE_PREREQ_PACKAGES = (
     "rpcbind sssd-tools openldap-clients bind-utils net-tools "
     "krb5-workstation python3.12 python3-pip"
 )
+
+# Product version like 5.2.3 or 5.2.3.1 inside zip names / RPM versions.
+_VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+){0,3})")
 
 
 def _run(node, cmd, timeout=7200, check=True):
@@ -85,6 +91,224 @@ def resolve_scale_roles(ceph_cluster):
         "scale_nodes": scale_nodes,
         "nfs_clients": nfs_clients,
     }
+
+
+def normalize_scale_version(value):
+    """
+    Extract a comparable Scale product version from a zip name or RPM version.
+
+    Examples:
+      Storage_Scale_...-5.2.3.1-...zip -> 5.2.3.1
+      gpfs.base-5.2.3-x -> 5.2.3
+    """
+    if not value:
+        return ""
+    match = _VERSION_RE.search(str(value).strip())
+    return match.group(1) if match else ""
+
+
+def scale_versions_equal(left, right):
+    """
+    True when two Scale version strings denote the same product version.
+
+    Trailing .0 components are ignored so zip ``6.0.1.0`` matches RPM ``6.0.1``.
+    """
+    a = normalize_scale_version(left)
+    b = normalize_scale_version(right)
+    if not a or not b:
+        return False
+    pa = [int(x) for x in a.split(".")]
+    pb = [int(x) for x in b.split(".")]
+    n = max(len(pa), len(pb))
+    pa.extend([0] * (n - len(pa)))
+    pb.extend([0] * (n - len(pb)))
+    return pa == pb
+
+
+def _ensure_aws_cli(installer, timeout):
+    """Install AWS CLI v2 if missing; raise if still unavailable."""
+    _run(
+        installer,
+        "bash -lc 'command -v aws >/dev/null || ("
+        "cd /tmp && curl -sS "
+        '"https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" '
+        "-o awscliv2.zip && unzip -qq -o awscliv2.zip && ./aws/install)'",
+        timeout=timeout,
+        check=False,
+    )
+    aws_path = _run_out(installer, "bash -lc 'command -v aws || true'", timeout=60)
+    if not aws_path:
+        raise OperationFailedError(
+            f"aws CLI not available on {installer.hostname} after install attempt"
+        )
+
+
+def fetch_version_to_use(installer, config=None):
+    """
+    Fetch S3 version_to_use.txt and return VERSION_TO_USE (installer zip name).
+
+    Does not download the Scale installer zip itself.
+    """
+    conf = config or {}
+    timeout = int(conf.get("deploy_timeout", 7200))
+    work_dir = conf.get("scale_download_dir", DEFAULT_DOWNLOAD_DIR)
+    bucket = conf.get("scale_s3_bucket", DEFAULT_S3_BUCKET)
+    version_key = conf.get("scale_s3_version_key", DEFAULT_VERSION_KEY)
+    source = str(conf.get("scale_installer_source", "s3")).lower()
+
+    if source == "nfs_share":
+        share_path = conf.get("scale_nfs_share_path")
+        if not share_path:
+            raise ConfigError(
+                "scale_installer_source=nfs_share requires scale_nfs_share_path"
+            )
+        # Zip basename is the desired version artifact name.
+        return _run_out(
+            installer,
+            f"bash -lc {shlex.quote(f'basename {share_path}')}",
+            timeout=60,
+        )
+
+    if source != "s3":
+        raise ConfigError(f"Unsupported scale_installer_source: {source}")
+
+    _run(installer, f"mkdir -p {work_dir}", timeout=timeout)
+    _ensure_aws_cli(installer, timeout)
+    script = (
+        f"cd {work_dir} && "
+        f'aws s3api get-object --bucket {bucket} --key "{version_key}" '
+        f"version_to_use.txt >/dev/null && "
+        "cat version_to_use.txt"
+    )
+    version = _run_out(installer, f"bash -lc {shlex.quote(script)}", timeout=timeout)
+    if not version:
+        raise OperationFailedError(
+            f"Empty VERSION_TO_USE from s3://{bucket}/{version_key}"
+        )
+    log.info("VERSION_TO_USE=%s", version)
+    return version
+
+
+def get_installed_scale_version(installer):
+    """Return installed Scale version string from gpfs.base RPM, or empty."""
+    out = _run_out(
+        installer,
+        "bash -lc \"rpm -q --qf '%{VERSION}' gpfs.base 2>/dev/null || true\"",
+        timeout=60,
+    )
+    if out and "not installed" not in out.lower():
+        return out
+    # Fallback: versioned tree under /usr/lpp/mmfs/<ver>
+    out = _run_out(
+        installer,
+        "bash -lc \"ls -1 /usr/lpp/mmfs 2>/dev/null | "
+        "grep -E '^[0-9]+\\.[0-9]+' | head -1 || true\"",
+        timeout=60,
+    )
+    return out or ""
+
+
+def scale_cluster_healthy(installer):
+    """True when GPFS core binaries exist and mmlscluster succeeds."""
+    script = (
+        "export PATH=\"$PATH:/usr/lpp/mmfs/bin\"; "
+        "if ! test -x /usr/lpp/mmfs/bin/mmlscluster; then echo no; exit 0; fi; "
+        "if mmlscluster >/dev/null 2>&1; then echo yes; else echo no; fi"
+    )
+    out = _run_out(installer, f"bash -lc {shlex.quote(script)}", timeout=120)
+    return out.strip() == "yes"
+
+
+def scale_residue_present(installer):
+    """True if Scale RPMs, /var/mmfs, or toolkit bits look present."""
+    checks = (
+        "rpm -q gpfs.base >/dev/null 2>&1 && echo yes",
+        "test -d /var/mmfs && echo yes",
+        "test -d /usr/lpp/mmfs && echo yes",
+        "ls /usr/lpp/mmfs/*/ansible-toolkit >/dev/null 2>&1 && echo yes",
+    )
+    for check in checks:
+        out = _run_out(installer, f"bash -lc {shlex.quote(check + ' || true')}", timeout=60)
+        if out.strip() == "yes":
+            return True
+    return False
+
+
+def should_reuse_existing_scale(ceph_cluster, config=None):
+    """
+    Decide whether to skip Scale install and reuse the existing cluster.
+
+    Returns:
+        (reuse: bool, version: str) — version is the normalized product version
+        when reusable, else "".
+
+    Config:
+      force_scale_redeploy: if true, never reuse
+    """
+    conf = config or {}
+    if conf.get("force_scale_redeploy"):
+        log.info("force_scale_redeploy set — will not reuse existing Scale")
+        return False, ""
+    if conf.get("skip_scale"):
+        return False, ""
+
+    roles = resolve_scale_roles(ceph_cluster)
+    installer = roles["installer"]
+
+    desired_raw = fetch_version_to_use(installer, conf)
+    installed_raw = get_installed_scale_version(installer)
+    desired = normalize_scale_version(desired_raw)
+    installed = normalize_scale_version(installed_raw)
+
+    log.info(
+        "Scale version check: VERSION_TO_USE=%s (%s) installed=%s (%s)",
+        desired_raw,
+        desired or "?",
+        installed_raw or "(none)",
+        installed or "?",
+    )
+
+    if not desired or not installed or not scale_versions_equal(desired, installed):
+        return False, desired
+    if not scale_cluster_healthy(installer):
+        log.warning(
+            "Versions match (%s ~ %s) but Scale cluster is not healthy — will redeploy",
+            desired,
+            installed,
+        )
+        return False, desired
+    log.info(
+        "Reusing existing Scale cluster (VERSION_TO_USE=%s ~ installed=%s)",
+        desired,
+        installed,
+    )
+    return True, installed
+
+
+def write_scale_reuse_marker(installer, version):
+    """Persist reuse decision for suite cleanup."""
+    body = f"echo {shlex.quote(str(version))} > {SCALE_REUSE_MARKER}"
+    _run(installer, f"bash -lc {shlex.quote(body)}", timeout=60)
+
+
+def clear_scale_reuse_marker(installer):
+    """Remove reuse marker (full Scale install path)."""
+    _run(
+        installer,
+        f"bash -lc {shlex.quote(f'rm -f {SCALE_REUSE_MARKER}')}",
+        timeout=60,
+        check=False,
+    )
+
+
+def scale_reuse_marker_present(installer):
+    """True if deploy left a reuse marker on the installer."""
+    out = _run_out(
+        installer,
+        f"bash -lc {shlex.quote(f'test -f {SCALE_REUSE_MARKER} && echo yes || true')}",
+        timeout=60,
+    )
+    return out.strip() == "yes"
 
 
 def download_scale(installer, config=None):
@@ -143,20 +367,7 @@ def download_scale(installer, config=None):
         raise ConfigError(f"Unsupported scale_installer_source: {source}")
 
     # Install AWS CLI v2 only when missing (creds already exported on target).
-    _run(
-        installer,
-        "bash -lc 'command -v aws >/dev/null || ("
-        "cd /tmp && curl -sS "
-        '"https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" '
-        "-o awscliv2.zip && unzip -qq -o awscliv2.zip && ./aws/install)'",
-        timeout=timeout,
-        check=False,
-    )
-    aws_path = _run_out(installer, "bash -lc 'command -v aws || true'", timeout=60)
-    if not aws_path:
-        raise OperationFailedError(
-            f"aws CLI not available on {installer.hostname} after install attempt"
-        )
+    _ensure_aws_cli(installer, timeout)
 
     s3_script = (
         f"cd {work_dir} && "

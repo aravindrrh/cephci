@@ -150,7 +150,7 @@ tests:
         nfs_export: /ibm/scale_volume
 
   - test:
-      name: Spectrum Scale / NFS cleanup
+      name: Spectrum Scale NFS cleanup
       module: upstream_nfs_cleanup.py
       desc: Uninstall Ganesha RPMs, remove clones, uninstall IBM Scale
       abort-on-fail: false

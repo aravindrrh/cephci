@@ -160,17 +160,29 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
         cloud-type: from run.py ``--cloud``; if baremetal, skip /etc/hosts
             and passwordless SSH setup
         skip_scale / skip_ganesha / skip_export: skip individual stages
+        force_scale_redeploy: ignore version match and reinstall Scale
         gerrit_host / gerrit_project / gerrit_refspec (or ganesha_repo /
             ganesha_branch): Ganesha source location
         scale_fs, ces_ip, scale_installer_source: see scale_deploy.py
         use_ci_tests_script: if true, fall back to legacy shell script path
+
+    When S3 VERSION_TO_USE matches the installed Scale version and the cluster
+    is healthy, Scale install is skipped (Ganesha-only). If the version changed
+    (or Scale is unhealthy), a full Scale wipe runs first, then Scale install.
     """
     from tests.nfs.lib.nfs_ganesha_deploy import (
         build_install_ganesha,
         create_nfs_export,
         resolve_ganesha_node,
     )
-    from tests.nfs.lib.scale_deploy import deploy_spectrum_scale, resolve_scale_roles
+    from tests.nfs.lib.scale_deploy import (
+        clear_scale_reuse_marker,
+        deploy_spectrum_scale,
+        resolve_scale_roles,
+        scale_residue_present,
+        should_reuse_existing_scale,
+        write_scale_reuse_marker,
+    )
 
     conf = config or {}
     timeout = int(conf.get("deploy_timeout", 7200))
@@ -219,11 +231,34 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
         "ganesha_node": ganesha_node,
     }
 
-    if not conf.get("skip_scale"):
-        scale_info = deploy_spectrum_scale(ceph_cluster, conf)
-        result.update(scale_info)
-    else:
+    if conf.get("skip_scale"):
         log.info("skip_scale set — skipping Spectrum Scale deploy")
+        clear_scale_reuse_marker(installer)
+    else:
+        reuse, reuse_ver = should_reuse_existing_scale(ceph_cluster, conf)
+        if reuse:
+            write_scale_reuse_marker(installer, reuse_ver)
+            result["scale_reused"] = True
+            result["scale_version"] = reuse_ver
+            log.info(
+                "VERSION_TO_USE matches installed Scale (%s) — "
+                "skipping Scale install; Ganesha only",
+                reuse_ver,
+            )
+        else:
+            # Version change / broken Scale / force: wipe before reinstall.
+            if scale_residue_present(installer):
+                log.info(
+                    "Scale version mismatch or unclean install — "
+                    "full Scale cleanup before redeploy"
+                )
+                uninstall_gpfs_scale(
+                    ceph_cluster, {**conf, "uninstall_scale": True}
+                )
+            clear_scale_reuse_marker(installer)
+            scale_info = deploy_spectrum_scale(ceph_cluster, conf)
+            result.update(scale_info)
+            result["scale_reused"] = False
 
     if not conf.get("skip_ganesha"):
         ganesha_info = build_install_ganesha(ceph_cluster, conf)
@@ -538,15 +573,29 @@ def _mm_cmd(cmd):
     return f"bash -lc 'export PATH=\"$PATH:{MMFS_BIN}\"; {cmd}'"
 
 
-def _stop_nfs_ganesha_stack(nodes, timeout=600):
-    """Stop nfs-ganesha and CES NFS on every node (installer first)."""
+def _stop_nfs_ganesha_stack(nodes, timeout=600, disable_ces_nfs=False):
+    """
+    Stop nfs-ganesha on every node (installer first).
+
+    By default do **not** ``mmces service disable nfs`` — that clears the local
+    /var/mmfs/ces/nfs-config cache while CCR still holds the objects. Ganesha-only
+    cleanup should leave CES NFS config on disk for the next reuse run.
+
+    Set disable_ces_nfs=True when doing a full Scale wipe.
+    """
     for node in nodes:
-        for cmd in (
+        cmds = [
             "systemctl stop nfs-ganesha || true",
             "systemctl disable nfs-ganesha || true",
-            _mm_cmd(f"{MMFS_BIN}/mmces service stop nfs || true"),
-            _mm_cmd(f"{MMFS_BIN}/mmces service disable nfs --force || true"),
-        ):
+        ]
+        if disable_ces_nfs:
+            cmds.extend(
+                (
+                    _mm_cmd(f"{MMFS_BIN}/mmces service stop nfs || true"),
+                    _mm_cmd(f"{MMFS_BIN}/mmces service disable nfs --force || true"),
+                )
+            )
+        for cmd in cmds:
             _best_effort(node, cmd, timeout=timeout)
 
 
@@ -582,20 +631,37 @@ def _remove_rpms_matching(node, pattern, timeout=600):
     _best_effort(node, cmd, timeout=timeout)
 
 
-def _remove_cleanup_dirs(node, timeout=600):
-    """Remove git clones, Scale download tree, NSD files, and residual Scale dirs."""
-    paths = " ".join(CLEANUP_CLONE_DIRS + CLEANUP_RESIDUAL_DIRS)
+def _remove_ganesha_clone_dirs(node, timeout=600):
+    """Remove Ganesha/ci-tests clones and download trees (not /var/mmfs)."""
+    paths = " ".join(CLEANUP_CLONE_DIRS)
     _best_effort(
         node,
-        f"bash -lc 'rm -rf {paths} /home/nsd1_* /root/nsd1_* 2>/dev/null || true'",
+        f"bash -lc 'rm -rf {paths} 2>/dev/null || true'",
         timeout=timeout,
     )
-    # Scale leaves ras logs even after package removal.
+
+
+def _remove_cleanup_dirs(node, timeout=600, remove_scale_dirs=True):
+    """Remove git clones, download trees; optionally Scale residual dirs."""
+    paths = list(CLEANUP_CLONE_DIRS)
+    if remove_scale_dirs:
+        paths.extend(CLEANUP_RESIDUAL_DIRS)
+    path_str = " ".join(paths)
+    nsd_rm = (
+        " /home/nsd1_* /root/nsd1_*" if remove_scale_dirs else ""
+    )
     _best_effort(
         node,
-        "bash -lc 'rm -rf /var/adm/ras/* 2>/dev/null || true'",
+        f"bash -lc 'rm -rf {path_str}{nsd_rm} 2>/dev/null || true'",
         timeout=timeout,
     )
+    if remove_scale_dirs:
+        # Scale leaves ras logs even after package removal.
+        _best_effort(
+            node,
+            "bash -lc 'rm -rf /var/adm/ras/* 2>/dev/null || true'",
+            timeout=timeout,
+        )
 
 
 def _remove_admin_deploy_dirs(installer, timeout=600):
@@ -647,47 +713,84 @@ def _remove_cesip_hosts_entries(installer):
 
 def uninstall_gpfs_scale(ceph_cluster, config=None):
     """
-    Tear down multi-node Spectrum Scale / NFS so static nodes can be redeployed.
+    Tear down NFS-Ganesha (default) and optionally the Spectrum Scale cluster.
 
-    Reverses artifacts from deploy_gpfs_scale / basic-storage-scale-multi-node.sh:
-    client mounts, Ganesha/CES, Scale FS/cluster, Ganesha+Scale RPMs, clones/dirs,
-    and cesip* entries in installer /etc/hosts.
+    Default (suite cleanup): Ganesha-only — unmounts, stop Ganesha/CES NFS,
+    remove Ganesha RPMs/clones. Leaves Scale cluster and CES IP intact so the
+    next run can reuse Scale when VERSION_TO_USE is unchanged.
+
+    Full Scale wipe when ``uninstall_scale`` / ``force_scale_uninstall`` is
+    true (used before redeploy when VERSION_TO_USE changes).
 
     Config keys:
         scale_fs: GPFS filesystem name (default scale_volume)
-        nfs_export: unused for uninstall path; kept for suite config symmetry
         cleanup_timeout: per-command timeout seconds (default 600)
+        uninstall_scale / force_scale_uninstall: also tear down Scale
     """
     conf = config or {}
     scale_fs = conf.get("scale_fs", DEFAULT_SCALE_FS)
     timeout = int(conf.get("cleanup_timeout", 600))
+    wipe_scale = bool(
+        conf.get("uninstall_scale") or conf.get("force_scale_uninstall")
+    )
 
     installer = ceph_cluster.get_nodes("installer")[0]
-    # Scale is installed on installer + both clients (NODE2/NODE3 in the script).
     nodes = ceph_cluster.get_nodes()
     # Installer first so cluster-wide mm* commands prefer the quorum node.
     ordered = [installer] + [n for n in nodes if n != installer]
 
-    log.info(
-        "Uninstalling Spectrum Scale / NFS on %d node(s) (installer=%s fs=%s)",
-        len(ordered),
-        installer.hostname,
-        scale_fs,
-    )
+    if wipe_scale:
+        log.info(
+            "Uninstalling Spectrum Scale + NFS-Ganesha on %d node(s) "
+            "(installer=%s fs=%s)",
+            len(ordered),
+            installer.hostname,
+            scale_fs,
+        )
+    else:
+        log.info(
+            "Uninstalling NFS-Ganesha only on %d node(s) "
+            "(installer=%s; Scale cluster preserved)",
+            len(ordered),
+            installer.hostname,
+        )
 
     run_suite_cleanup(ceph_cluster, conf)
-    _stop_nfs_ganesha_stack(ordered, timeout=timeout)
-    _teardown_scale_cluster(installer, scale_fs, timeout=timeout)
+    # Ganesha-only: leave CES NFS enabled so nfs-config stays on disk / in CCR sync.
+    _stop_nfs_ganesha_stack(
+        ordered, timeout=timeout, disable_ces_nfs=wipe_scale
+    )
+
+    if wipe_scale:
+        _teardown_scale_cluster(installer, scale_fs, timeout=timeout)
 
     for node in ordered:
         _remove_rpms_matching(node, GANESHA_RPM_GREP, timeout=timeout)
-        _remove_rpms_matching(node, SCALE_RPM_GREP, timeout=timeout)
-        _remove_cleanup_dirs(node, timeout=timeout)
+        if wipe_scale:
+            _remove_rpms_matching(node, SCALE_RPM_GREP, timeout=timeout)
+            _remove_cleanup_dirs(node, timeout=timeout, remove_scale_dirs=True)
+        else:
+            _remove_ganesha_clone_dirs(node, timeout=timeout)
 
-    # Installer/_admin: explicitly wipe Scale download, ci-tests clone, rpmbuild.
+    # Always drop admin download/clone dirs (not the live Scale install).
     _remove_admin_deploy_dirs(installer, timeout=timeout)
     _strip_deploy_bashrc_exports(installer)
-    _remove_cesip_hosts_entries(installer)
+    if wipe_scale:
+        _remove_cesip_hosts_entries(installer)
+        try:
+            from tests.nfs.lib.scale_deploy import clear_scale_reuse_marker
 
-    log.info("Spectrum Scale / NFS uninstall completed (best-effort)")
-    return {"installer": installer, "nodes": ordered, "scale_fs": scale_fs}
+            clear_scale_reuse_marker(installer)
+        except Exception as exc:
+            log.warning("clear_scale_reuse_marker failed: %s", exc)
+
+    log.info(
+        "Cleanup completed (best-effort, wipe_scale=%s)",
+        wipe_scale,
+    )
+    return {
+        "installer": installer,
+        "nodes": ordered,
+        "scale_fs": scale_fs,
+        "wipe_scale": wipe_scale,
+    }

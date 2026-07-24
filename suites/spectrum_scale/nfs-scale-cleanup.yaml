@@ -1,8 +1,9 @@
 #===============================================================================================
-# Spectrum Scale / NFS cleanup-only suite.
+# NFS-Ganesha cleanup-only suite (Scale cluster is preserved by default).
 #
-# Run at the end of a pipeline (or standalone) to return static Onecloud /
-# baremetal nodes to a clean state before the next deploy.
+# Run at the end of a pipeline (or standalone). Removes Ganesha RPMs/clones
+# so the next run can rebuild Ganesha while reusing Scale when VERSION_TO_USE
+# is unchanged. Set uninstall_scale: true under config to also wipe Scale.
 #
 # Conf examples:
 #   conf/spectrum_scale/spectrum_scale_onecloud_3node.yaml
@@ -17,9 +18,9 @@
 tests:
 
   - test:
-      name: Spectrum Scale / NFS cleanup
+      name: Spectrum Scale NFS cleanup
       module: upstream_nfs_cleanup.py
-      desc: Uninstall Ganesha RPMs, remove clones, uninstall IBM Scale
+      desc: Uninstall NFS-Ganesha RPMs and clones (Scale preserved)
       abort-on-fail: false
       timeout: 7200
       config:
