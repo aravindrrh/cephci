@@ -1,5 +1,6 @@
 """Spectrum Scale (GPFS) NFS bootstrap and client mounts for upstream cephci tests."""
 
+import shlex
 from os import environ
 from time import sleep
 
@@ -166,9 +167,10 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
         scale_fs, ces_ip, scale_installer_source: see scale_deploy.py
         use_ci_tests_script: if true, fall back to legacy shell script path
 
-    When S3 VERSION_TO_USE matches the installed Scale version and the cluster
-    is healthy, Scale install is skipped (Ganesha-only). If the version changed
-    (or Scale is unhealthy), a full Scale wipe runs first, then Scale install.
+    When S3 VERSION_TO_USE matches the installed Scale version, Scale install
+    is skipped and a Ganesha-only cleanup runs before rebuilding Ganesha.
+    If the version changed (or Scale residue is present), a full Scale wipe
+    runs first, then Scale install.
     """
     from tests.nfs.lib.nfs_ganesha_deploy import (
         build_install_ganesha,
@@ -245,6 +247,15 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
                 "skipping Scale install; Ganesha only",
                 reuse_ver,
             )
+            # Purge prior Ganesha RPMs/config/logs so the rebuild is clean.
+            # Scale cluster and CES nfs-config are left intact (uninstall_scale=False).
+            if not conf.get("skip_ganesha"):
+                log.info(
+                    "Scale reused — running Ganesha-only cleanup before rebuild"
+                )
+                uninstall_gpfs_scale(
+                    ceph_cluster, {**conf, "uninstall_scale": False}
+                )
         else:
             # Version change / broken Scale / force: wipe before reinstall.
             if scale_residue_present(installer):
@@ -548,8 +559,26 @@ CLEANUP_RESIDUAL_DIRS = (
     "/usr/lpp/mmfs",
     "/tmp/mmfs",
 )
-GANESHA_RPM_GREP = r"^(nfs-ganesha|libntirpc|gpfs\.nfs-ganesha)"
+# Broad match: nfs-ganesha*, libntirpc*, gpfs.nfs-ganesha* (IBM + upstream).
+GANESHA_RPM_GREP = r"(nfs-ganesha|libntirpc|gpfs\.nfs-ganesha)"
 SCALE_RPM_GREP = r"^(gpfs|spectrum)"
+GANESHA_SYSTEMD_UNITS = (
+    "/usr/lib/systemd/system/nfs-ganesha.service",
+    "/usr/lib/systemd/system/nfs-ganesha-lock.service",
+    "/usr/lib/systemd/system/nfs-ganesha-config.service",
+    "/etc/systemd/system/nfs-ganesha.service",
+    "/etc/systemd/system/nfs-ganesha.service.d",
+    "/etc/systemd/system/nfs-ganesha-lock.service",
+    "/etc/systemd/system/nfs-ganesha-config.service",
+)
+GANESHA_CONFIG_DIRS = (
+    "/etc/ganesha",
+)
+GANESHA_LOG_PATHS = (
+    "/var/log/ganesha.log",
+    "/var/log/ganesha/ganesha.log",
+    "/var/log/ganesha",
+)
 
 
 def _best_effort(node, cmd, timeout=600):
@@ -625,10 +654,51 @@ def _teardown_scale_cluster(installer, scale_fs, timeout=600):
 def _remove_rpms_matching(node, pattern, timeout=600):
     """Remove RPMs whose names match egrep pattern (nodeps for stuck deps)."""
     cmd = (
-        f"bash -lc \"pkgs=$(rpm -qa | grep -E '{pattern}' || true); "
-        f'if [ -n \\"$pkgs\\" ]; then rpm -e --nodeps $pkgs || true; fi"'
+        f"bash -lc \"pkgs=$(rpm -qa | grep -iE '{pattern}' || true); "
+        f'echo \\"Matching RPMs: $pkgs\\"; '
+        f'if [ -n \\"$pkgs\\" ]; then rpm -e --nodeps $pkgs || true; fi; '
+        f'left=$(rpm -qa | grep -iE \\"{pattern}\\" || true); '
+        f'if [ -n \\"$left\\" ]; then echo \\"WARNING: still installed: $left\\"; fi"'
     )
     _best_effort(node, cmd, timeout=timeout)
+
+
+def _purge_nfs_ganesha_artifacts(node, timeout=600):
+    """
+    Fully remove NFS-Ganesha packages and leftover config/service/log files.
+
+    rpm -e alone often leaves a customized unit (we sed StateDirectory) and
+    /etc/ganesha from a prior run, which then poisons the next source build.
+    """
+    units = " ".join(GANESHA_SYSTEMD_UNITS)
+    configs = " ".join(GANESHA_CONFIG_DIRS)
+    logs = " ".join(GANESHA_LOG_PATHS)
+    script = f"""
+set +e
+systemctl stop nfs-ganesha nfs-ganesha-lock nfs-ganesha-config 2>/dev/null
+systemctl disable nfs-ganesha nfs-ganesha-lock nfs-ganesha-config 2>/dev/null
+pkill -9 ganesha.nfsd 2>/dev/null
+# All Ganesha / ntirpc / IBM bundled Ganesha RPMs
+pkgs=$(rpm -qa | grep -iE '{GANESHA_RPM_GREP}' || true)
+echo "Removing Ganesha RPMs: $pkgs"
+if [ -n "$pkgs" ]; then rpm -e --nodeps $pkgs; fi
+# Leftover unit files (customized units survive rpm -e)
+rm -rf {units}
+# Drop prior run config so next build starts clean
+rm -rf {configs}
+# Logs from previous ganesha.nfsd
+rm -rf {logs}
+systemctl daemon-reload
+systemctl reset-failed nfs-ganesha 2>/dev/null
+echo "Remaining Ganesha RPMs: $(rpm -qa | grep -iE '{GANESHA_RPM_GREP}' || echo none)"
+ls /etc/ganesha 2>&1 || echo "/etc/ganesha gone"
+ls /usr/lib/systemd/system/nfs-ganesha* 2>&1 || echo "no nfs-ganesha units left"
+"""
+    _best_effort(
+        node,
+        f"bash -lc {shlex.quote(script)}",
+        timeout=timeout,
+    )
 
 
 def _remove_ganesha_clone_dirs(node, timeout=600):
@@ -765,7 +835,8 @@ def uninstall_gpfs_scale(ceph_cluster, config=None):
         _teardown_scale_cluster(installer, scale_fs, timeout=timeout)
 
     for node in ordered:
-        _remove_rpms_matching(node, GANESHA_RPM_GREP, timeout=timeout)
+        # Full Ganesha purge: RPMs + unit files + /etc/ganesha + logs.
+        _purge_nfs_ganesha_artifacts(node, timeout=timeout)
         if wipe_scale:
             _remove_rpms_matching(node, SCALE_RPM_GREP, timeout=timeout)
             _remove_cleanup_dirs(node, timeout=timeout, remove_scale_dirs=True)
