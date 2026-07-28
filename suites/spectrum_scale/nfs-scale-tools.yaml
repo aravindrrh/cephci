@@ -140,10 +140,55 @@ tests:
         skip_deployment: true
         clients: 2
         nfs_export: /ibm/scale_volume/export1
+
+  # ACL modules assume Scale+Ganesha+export1 already up (no acl_deploy).
+  # Placed late so Ganesha restart inside functional has less impact on tools.
+  - test:
+      name: NFS v4 ACL functional
+      module: upstream_nfs_acl_functional.py
+      desc: Positive NFSv4 ACL scenarios on Scale-exported NFS
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+
+  - test:
+      name: NFS v4 ACL negative
+      module: upstream_nfs_acl_negative.py
+      desc: Denial and boundary NFSv4 ACL tests on GPFS-backed NFS
+      abort-on-fail: false
+      timeout: 7200
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+
+  - test:
+      name: NFS v4 ACL scale
+      module: upstream_nfs_acl_scale.py
+      desc: Large ACE count and persistence-after-remount on GPFS-backed NFS
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+
   - test:
       name: Spectrum Scale NFS cleanup
       module: upstream_nfs_cleanup.py
-      desc: Uninstall Ganesha RPMs, remove clones, uninstall IBM Scale
+      desc: Uninstall Ganesha RPMs, remove clones (Scale preserved by default)
       abort-on-fail: false
       timeout: 7200
       config:
