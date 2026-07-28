@@ -123,7 +123,7 @@ def run(ceph_cluster, **kw):
     )
     client_timeout = config.get("multilock_client_timeout", 10400)
     controller_startup_delay = config.get("multilock_controller_delay", 10)
-    scale_export = config.get("nfs_export", "/ibm/scale_volume")
+    scale_export = config.get("nfs_export", "/ibm/scale_volume/export1")
 
     iterations = int(config.get("multilock_iterations", config.get("iterations", 1)))
     iterations = max(1, iterations)

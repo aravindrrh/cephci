@@ -16,14 +16,14 @@ def run(ceph_cluster, **kw):
             "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",
             # "sh ci-tests/build_scripts/common/basic-storage-scale-custom-repo.sh",
             f'echo "export SERVER=\"{server.ip_address}\"" >> ~/.bashrc && source ~/.bashrc',
-            f'echo "export EXPORT=\"/ibm/scale_volume\"" >> ~/.bashrc && source ~/.bashrc',
+            f'echo "export EXPORT=\"/ibm/scale_volume/export1\"" >> ~/.bashrc && source ~/.bashrc',
             f'echo "export YUM_REPO=\"http://magna002.ceph.redhat.com/ceph-qe-logs/manim/repo/nfs-ganesha-v7.repo\"" >> ~/.bashrc && source ~/.bashrc']
     for cmd in cmds:
         out = server.exec_command(cmd=cmd, sudo=True, long_running=True)
         log.info(out)
 
     mount_path = "/mnt/nfsv4"
-    EXPORT = "/ibm/scale_volume"
+    EXPORT = "/ibm/scale_volume/export1"
     cmds = ["dnf -y install git gcc nfs-utils time make",
             "subscription-manager repos --enable codeready-builder-for-rhel-$(rpm -E %rhel)-$(uname -m)-rpms",
             "dnf -y install epel-release libtirpc-devel --skip-broken",

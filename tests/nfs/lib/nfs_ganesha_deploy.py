@@ -22,6 +22,8 @@ DEFAULT_GERRIT_HOST = "github.com"
 DEFAULT_GERRIT_PROJECT = "nfs-ganesha/nfs-ganesha"
 DEFAULT_GERRIT_REFSPEC = "refs/heads/next"
 DEFAULT_SCALE_FS = "scale_volume"
+# Export a subdir — not the FS root — so client rm/cleanup cannot wipe CES/HA dirs.
+DEFAULT_NFS_EXPORT = f"/ibm/{DEFAULT_SCALE_FS}/export1"
 MMFS_BIN = "/usr/lpp/mmfs/bin"
 # Scale CES materializes CCR-backed Ganesha fragments here.
 CES_NFS_CONFIG_DIRS = (
@@ -318,13 +320,17 @@ def create_nfs_export(ceph_cluster, config=None):
 
     Config keys:
         scale_fs: filesystem name (default scale_volume)
-        nfs_export: export path (default /ibm/<scale_fs>)
+        nfs_export: export path (default /ibm/<scale_fs>/export1)
         deploy_timeout: timeout seconds
     """
     conf = config or {}
     timeout = int(conf.get("deploy_timeout", 7200))
     scale_fs = conf.get("scale_fs", DEFAULT_SCALE_FS)
-    nfs_export = conf.get("nfs_export") or f"/ibm/{scale_fs}"
+    nfs_export = conf.get("nfs_export") or (
+        DEFAULT_NFS_EXPORT
+        if scale_fs == DEFAULT_SCALE_FS
+        else f"/ibm/{scale_fs}/export1"
+    )
     node = resolve_ganesha_node(ceph_cluster)
 
     log.info("create_nfs_export on %s export=%s", node.hostname, nfs_export)
@@ -337,6 +343,8 @@ def create_nfs_export(ceph_cluster, config=None):
         timeout=timeout,
         check=False,
     )
+    # Create export subdir on the Scale FS (never export FS root — CES/HA live there).
+    _run(node, f"mkdir -p {nfs_export}", timeout=timeout)
     # Idempotent: reuse path leaves the Scale export in place across runs.
     _run(
         node,

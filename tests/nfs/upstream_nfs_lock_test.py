@@ -246,7 +246,7 @@ def run(ceph_cluster, **kw):
     server = ceph_cluster.get_nodes("installer")[0]
     client = clients[0]
     nfstest_lock = f"{NFSTEST_DIR}/test/nfstest_lock"
-    export = config.get("nfs_export", "/ibm/scale_volume")
+    export = config.get("nfs_export", "/ibm/scale_volume/export1")
 
     try:
         if not should_skip_deployment(config):

@@ -18,9 +18,9 @@ def run (ceph_cluster, **kw):
 
         # Perform mount on client
         cmds = ["mkdir -p /mnt/nfsv3",
-                f"mount -t nfs -o vers=3 {server.ip_address}:/ibm/scale_volume /mnt/nfsv3",
+                f"mount -t nfs -o vers=3 {server.ip_address}:/ibm/scale_volume/export1 /mnt/nfsv3",
                 "mkdir -p /mnt/nfsv4",
-                f"mount -t nfs -o vers=4 {server.ip_address}:/ibm/scale_volume /mnt/nfsv4"
+                f"mount -t nfs -o vers=4 {server.ip_address}:/ibm/scale_volume/export1 /mnt/nfsv4"
                 ]
 
         for cmd in cmds:

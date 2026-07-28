@@ -4,9 +4,8 @@ import shlex
 from os import environ
 from time import sleep
 
-from ceph.waiter import WaitUntil
 from cli.exceptions import ConfigError, OperationFailedError
-from cli.utilities.filesys import Mount, MountFailedError, Unmount
+from cli.utilities.filesys import Mount, MountFailedError
 from utility.log import Log
 
 log = Log(__name__)
@@ -346,7 +345,8 @@ def setup_gpfs_nfs(ceph_cluster, config):
 
     Environment:
         SKIP_DEPLOYMENT: if ``true``, skip server bootstrap (cluster already prepared).
-        EXPORT_NAME: export path when not set in config (default ``/ibm/scale_volume``).
+        EXPORT_NAME: export path when not set in config
+            (default ``/ibm/scale_volume/export1``).
 
     Config keys:
         mount_point, nfs_export, port, nfs_version, clients, mount_type
@@ -358,7 +358,9 @@ def setup_gpfs_nfs(ceph_cluster, config):
     """
     conf = config or {}
     mount_point = conf.get("mount_point", "/mnt/nfs")
-    nfs_export = conf.get("nfs_export") or environ.get("EXPORT_NAME", "/ibm/scale_volume")
+    nfs_export = conf.get("nfs_export") or environ.get(
+        "EXPORT_NAME", "/ibm/scale_volume/export1"
+    )
     port = str(conf.get("port", "2049"))
     version = str(conf.get("nfs_version", "4.1"))
     no_clients = int(conf.get("clients", "1"))
@@ -430,7 +432,12 @@ def setup_gpfs_nfs(ceph_cluster, config):
 
 
 def get_suite_cleanup_mount_points(config):
-    """Return mount paths to clear between combined-suite tests."""
+    """
+    Return configured mount paths (legacy helper).
+
+    Preferred suite cleanup now sweeps all of /mnt on NFS-only test nodes;
+    this list is kept for callers that still pass explicit paths.
+    """
     conf = config or {}
     points = set(COMMON_UPSTREAM_MOUNT_POINTS)
     mount_point = conf.get("mount_point")
@@ -444,58 +451,95 @@ def get_suite_cleanup_mount_points(config):
 
 
 def cleanup_nfs_mount_on_node(node, nfs_mount, remove_mount_dir=True):
-    """rm -rf mount contents, unmount, and optionally remove the mount directory."""
-    host = node.hostname
+    """Force-unmount a single path, then remove the directory."""
+    host = getattr(node, "hostname", str(node))
+    rm = f" && rm -rf {shlex.quote(nfs_mount)}" if remove_mount_dir else ""
+    cmd = (
+        f"bash -lc 'umount -f {shlex.quote(nfs_mount)} 2>/dev/null "
+        f"|| umount -l {shlex.quote(nfs_mount)} 2>/dev/null || true"
+        f"{rm}'"
+    )
     try:
+        log.info("[%s] %s", host, cmd)
+        node.exec_command(cmd=cmd, sudo=True, check_ec=False)
+    except Exception as exc:
+        log.warning("cleanup mount %s on %s: %s", nfs_mount, host, exc)
+
+
+def _cleanup_all_mnt_and_nfs_on_node(node, timeout=600):
+    """
+    Fast mount cleanup for NFS-only test nodes.
+
+    1. For every /mnt/<dir>: umount -f (fallback -l), then rm -rf
+    2. Sweep leftover nfs/nfs4 mounts from findmnt/mount and unmount them
+    """
+    host = getattr(node, "hostname", str(node))
+    script = r"""
+set +e
+echo "----- /mnt before cleanup -----"
+ls -la /mnt 2>/dev/null || true
+findmnt -t nfs,nfs4 2>/dev/null || mount | grep -E 'type nfs' || true
+
+# Phase 1: everything under /mnt (these boxes only run NFS suite mounts here)
+for d in /mnt/*; do
+  [ -e "$d" ] || continue
+  echo "umount+rm $d"
+  umount -f "$d" 2>/dev/null || umount -l "$d" 2>/dev/null || true
+  rm -rf "$d"
+done
+
+# Phase 2: any leftover NFS mounts (anywhere)
+while read -r m; do
+  [ -z "$m" ] && continue
+  [ "$m" = "/" ] && continue
+  echo "leftover NFS umount $m"
+  umount -f "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true
+done < <(
+  findmnt -t nfs,nfs4 -n -o TARGET 2>/dev/null
+  mount 2>/dev/null | awk '/ type nfs/ {print $3}'
+)
+
+echo "----- /mnt after cleanup -----"
+ls -la /mnt 2>/dev/null || true
+left=$(findmnt -t nfs,nfs4 -n -o TARGET 2>/dev/null || true)
+if [ -n "$left" ]; then
+  echo "WARNING: NFS mounts still present:"
+  echo "$left"
+else
+  echo "No NFS mounts remaining"
+fi
+"""
+    try:
+        log.info("[%s] sweeping /mnt and leftover NFS mounts", host)
         node.exec_command(
-            cmd=f"bash -lc 'sync; rm -rf {nfs_mount}/* 2>/dev/null; true'",
+            cmd=f"bash -lc {shlex.quote(script)}",
             sudo=True,
+            long_running=True,
+            timeout=timeout,
             check_ec=False,
         )
     except Exception as exc:
-        log.warning("cleanup rm under %s on %s: %s", nfs_mount, host, exc)
-    sleep(1)
-    for umount_cmd in (
-        f"umount -f {nfs_mount} 2>/dev/null || true",
-        f"umount -l {nfs_mount} 2>/dev/null || true",
-    ):
-        try:
-            node.exec_command(cmd=umount_cmd, sudo=True, check_ec=False)
-        except Exception as exc:
-            log.warning("cleanup %s on %s (%s): %s", umount_cmd, host, nfs_mount, exc)
-    sleep(1)
-    try:
-        out = Unmount(node).unmount(nfs_mount)
-        if out:
-            log.warning("Unmount helper %s on %s: %s", nfs_mount, host, out)
-    except Exception as exc:
-        log.warning("Unmount helper failed for %s on %s: %s", nfs_mount, host, exc)
-    if remove_mount_dir:
-        try:
-            node.exec_command(cmd=f"rm -rf {nfs_mount}", sudo=True, check_ec=False)
-        except Exception as exc:
-            log.warning("cleanup rmdir %s on %s: %s", nfs_mount, host, exc)
+        log.warning("[%s] /mnt NFS sweep failed: %s", host, exc)
 
 
 def cleanup_upstream_nfs_mounts(nodes, mount_points=None, remove_mount_dir=True):
     """
-    Clear NFS mount data and unmount on all given nodes.
+    Clear NFS mounts on the given nodes.
 
-    Used between tests in a combined suite so the next test starts clean.
+    On NFS-only Onecloud/static nodes: sweep all of /mnt, then any leftover
+    nfs/nfs4 mounts. ``mount_points`` is ignored for the sweep (kept for API
+    compatibility with older callers).
     """
     if not nodes:
         return
     if not isinstance(nodes, list):
         nodes = [nodes]
-    points = mount_points or list(COMMON_UPSTREAM_MOUNT_POINTS)
     log.info(
-        "Suite cleanup: clearing %d mount point(s) on %d node(s)",
-        len(points),
+        "Suite cleanup: sweeping /mnt + leftover NFS on %d node(s)",
         len(nodes),
     )
     for node in nodes:
-        for nfs_mount in points:
-            cleanup_nfs_mount_on_node(node, nfs_mount, remove_mount_dir=remove_mount_dir)
+        _cleanup_all_mnt_and_nfs_on_node(node)
     log.info("Suite NFS mount cleanup completed")
 
 
@@ -505,27 +549,14 @@ def run_suite_cleanup(ceph_cluster, config):
     if conf.get("suite_cleanup", True) is False:
         return
     nodes = ceph_cluster.get_nodes("client")
-    cleanup_upstream_nfs_mounts(
-        nodes, get_suite_cleanup_mount_points(conf), remove_mount_dir=True
-    )
+    cleanup_upstream_nfs_mounts(nodes)
 
 
 def teardown_gpfs_nfs(clients, nfs_mount):
-    """Remove data under the mount, unmount, and delete the mount point."""
+    """Unmount and delete a single NFS mount point on clients."""
     if not isinstance(clients, list):
         clients = [clients]
-    timeout, interval = 600, 10
     for client in clients:
-        for w in WaitUntil(timeout=timeout, interval=interval):
-            try:
-                client.exec_command(
-                    sudo=True, cmd=f"rm -rf {nfs_mount}/*", long_running=True
-                )
-                break
-            except Exception as e:
-                log.warning("rm under %s failed, retrying: %s", nfs_mount, e)
-        if w.expired:
-            log.error("Timeout clearing %s on %s", nfs_mount, client.hostname)
         cleanup_nfs_mount_on_node(client, nfs_mount, remove_mount_dir=True)
 
 

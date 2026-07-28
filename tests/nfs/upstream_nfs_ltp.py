@@ -10,7 +10,7 @@ log = Log(__name__)
 def run(ceph_cluster, **kw):
     config = kw.get("config") or {}
     clients = ceph_cluster.get_nodes("client")
-    export_name = config.get("nfs_export") or environ.get("EXPORT_NAME", "/ibm/scale_volume")
+    export_name = config.get("nfs_export") or environ.get("EXPORT_NAME", "/ibm/scale_volume/export1")
 
     log.info("Setup nfs cluster")
     try:

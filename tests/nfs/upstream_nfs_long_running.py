@@ -19,7 +19,7 @@ def run(ceph_cluster, **kw):
             deploy_gpfs_scale(ceph_cluster, config)
 
         cmds = [f'echo "export SERVER=\"{server.ip_address}\"" >> ~/.bashrc && source ~/.bashrc',
-                f'echo "export EXPORT=\"/ibm/scale_volume\"" >> ~/.bashrc && source ~/.bashrc',
+                f'echo "export EXPORT=\"/ibm/scale_volume/export1\"" >> ~/.bashrc && source ~/.bashrc',
                 "rm -rf ci-tests/",
                 "yum install -y git wget",
                 "git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout scale_downstream",

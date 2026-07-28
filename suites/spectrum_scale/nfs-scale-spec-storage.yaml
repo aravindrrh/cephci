@@ -15,8 +15,7 @@ tests:
       timeout: 14400
       config:
         clients: 2
-        nfs_export: /ibm/scale_volume
-
+        nfs_export: /ibm/scale_volume/export1
   - test:
       name: SPECstorage
       module: upstream_nfs_spec_storage.py
@@ -27,7 +26,7 @@ tests:
         skip_deployment: true
         clients: 2
         mount_point: /mnt/nfs
-        nfs_export: /ibm/scale_volume
+        nfs_export: /ibm/scale_volume/export1
         nfs_version: "4.1"
         benchmark: SWBUILD
         load: 1

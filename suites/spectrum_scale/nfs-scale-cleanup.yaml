@@ -26,4 +26,4 @@ tests:
       config:
         clients: 2
         scale_fs: scale_volume
-        nfs_export: /ibm/scale_volume
+        nfs_export: /ibm/scale_volume/export1

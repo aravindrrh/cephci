@@ -11,7 +11,7 @@ def run (ceph_cluster, **kw):
     clients = ceph_cluster.get_nodes("client")
     log.info("Setup nfs cluster")
     config = kw.get("config") or {}
-    export_name = config.get("nfs_export") or environ.get("EXPORT_NAME", "/ibm/scale_volume")
+    export_name = config.get("nfs_export") or environ.get("EXPORT_NAME", "/ibm/scale_volume/export1")
 
     try:
         server = ceph_cluster.get_nodes("installer")[0]

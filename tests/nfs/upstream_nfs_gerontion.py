@@ -153,7 +153,7 @@ def run(ceph_cluster, **kw):
         raw_minutes,
         workload_duration_sec,
     )
-    export_name = "/ibm/scale_volume"
+    export_name = "/ibm/scale_volume/export1"
 
     try:
         server = ceph_cluster.get_nodes("installer")[0]

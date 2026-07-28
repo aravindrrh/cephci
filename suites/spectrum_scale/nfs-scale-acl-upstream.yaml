@@ -5,7 +5,7 @@
 # skip_deployment: true so they only NFS-mount clients
 # (see tests/nfs/lib/upstream_gpfs_nfs_setup.py).
 # SKIP_DEPLOYMENT env still works when skip_deployment is not set in YAML.
-# EXPORT_NAME env overrides nfs_export default (/ibm/scale_volume).
+# EXPORT_NAME env overrides nfs_export default (/ibm/scale_volume/export1).
 #
 # Conf: conf/spectrum_scale/spectrum_scale_2node.yaml (installer + 2 clients)
 #
@@ -22,7 +22,7 @@ tests:
         nfs_version: "4.1"
         clients: 1
         mount_point: /mnt/nfs
-        nfs_export: /ibm/scale_volume
+        nfs_export: /ibm/scale_volume/export1
         port: "2049"
 
   - test:
@@ -36,7 +36,7 @@ tests:
         nfs_version: "4.1"
         clients: 1
         mount_point: /mnt/nfs
-        nfs_export: /ibm/scale_volume
+        nfs_export: /ibm/scale_volume/export1
         port: "2049"
 
   - test:
@@ -50,7 +50,7 @@ tests:
         nfs_version: "4.1"
         clients: 1
         mount_point: /mnt/nfs
-        nfs_export: /ibm/scale_volume
+        nfs_export: /ibm/scale_volume/export1
         port: "2049"
 
   - test:
@@ -64,5 +64,5 @@ tests:
         nfs_version: "4.1"
         clients: 1
         mount_point: /mnt/nfs
-        nfs_export: /ibm/scale_volume
+        nfs_export: /ibm/scale_volume/export1
         port: "2049"

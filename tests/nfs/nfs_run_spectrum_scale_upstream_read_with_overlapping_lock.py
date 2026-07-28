@@ -14,7 +14,7 @@ def run(ceph_cluster, **kw):
 
 
     mount_path = "/mnt/nfsv4"
-    EXPORT = "/ibm/scale_volume"
+    EXPORT = "/ibm/scale_volume/export1"
 
     # Test Scenario : 2
     test_file = """#include <stdlib.h>

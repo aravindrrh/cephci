@@ -20,7 +20,7 @@ def run(ceph_cluster, **kw):
     config = kw.get("config") or {}
     server = ceph_cluster.get_nodes("installer")[0]
     client = ceph_cluster.get_nodes("client")[0]
-    export_name = config.get("nfs_export") or environ.get("EXPORT_NAME", "/ibm/scale_volume")
+    export_name = config.get("nfs_export") or environ.get("EXPORT_NAME", "/ibm/scale_volume/export1")
 
     try:
         if not should_skip_deployment(config):
