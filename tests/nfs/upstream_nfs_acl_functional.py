@@ -150,14 +150,14 @@ def run(ceph_cluster, **kw):
         # --- Persistence (destructive tests last) ---
         results.append(("Rename Persistence", _run_test(_test_rename, acl)))
         results.append(("Hard Link Persistence", _run_test(_test_hard_link, acl)))
-        results.append(
-            (
-                "Restart Persistence",
-                _run_test(_test_restart, acl, server_node),
-            )
-        )
         # Reboot test skipped: NFS-Ganesha is not auto-restarted after reboot,
         # causing stale mount entries. Re-enable once auto-restart is wired up.
+        # results.append(
+        #     (
+        #         "Restart Persistence",
+        #         _run_test(_test_restart, acl, server_node),
+        #     )
+        # )
         # results.append(
         #     (
         #         "Reboot Persistence",

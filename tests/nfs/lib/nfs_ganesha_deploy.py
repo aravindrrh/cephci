@@ -9,6 +9,9 @@ Config defaults match basic-storage-scale-multi-node.sh:
   gerrit_host=github.com
   gerrit_project=nfs-ganesha/nfs-ganesha
   gerrit_refspec=refs/heads/next
+
+Before cmake/rpmbuild, applies scale_acl_fix.patch (setfsuid/setfsgid)
+so non-root NFSv4 ACL checks work on GPFS.
 """
 
 import shlex
@@ -24,6 +27,12 @@ DEFAULT_GERRIT_REFSPEC = "refs/heads/next"
 DEFAULT_SCALE_FS = "scale_volume"
 # Export a subdir — not the FS root — so client rm/cleanup cannot wipe CES/HA dirs.
 DEFAULT_NFS_EXPORT = f"/ibm/{DEFAULT_SCALE_FS}/export1"
+# IBM Scale ACL fix: setfsuid/setfsgid instead of setresuid/setresgid.
+# Without this, non-root NFSv4 ACL checks fail on GPFS-backed Ganesha.
+SCALE_ACL_FIX_PATCH_URL = (
+    "https://raw.githubusercontent.com/aravindrrh/ci-tests/"
+    "scale_downstream/build_scripts/common/scale_acl_fix.patch"
+)
 MMFS_BIN = "/usr/lpp/mmfs/bin"
 # Scale CES materializes CCR-backed Ganesha fragments here.
 CES_NFS_CONFIG_DIRS = (
@@ -248,6 +257,21 @@ def build_install_ganesha(ceph_cluster, config=None):
         "(git submodule update --recursive --init || git submodule sync)"
     )
     _run(node, f"bash -lc {shlex.quote(fetch_script)}", timeout=timeout)
+
+    # Required for non-root ACL tests on Scale; fail hard if context drifted.
+    patch_path = "/tmp/scale_acl_fix.patch"
+    patch_url_q = shlex.quote(SCALE_ACL_FIX_PATCH_URL)
+    patch_path_q = shlex.quote(patch_path)
+    patch_script = (
+        f"cd {clone_dir} && "
+        f"(curl -fsSL -o {patch_path_q} {patch_url_q} || "
+        f"wget -q -O {patch_path_q} {patch_url_q}) && "
+        f"git apply --verbose {patch_path_q}"
+    )
+    log.info(
+        "Applying Scale ACL fix patch on %s (setfsuid/setfsgid)", node.hostname
+    )
+    _run(node, f"bash -lc {shlex.quote(patch_script)}", timeout=timeout)
 
     # Stop Ganesha only — do not mmces disable nfs (that clears local
     # /var/mmfs/ces/nfs-config while CCR still has the objects).

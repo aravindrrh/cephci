@@ -21,7 +21,7 @@ class SpecStorage(Cli):
         self.base_cmd = f"python3 {self.sm2020}"
         self.outputlog = "result"
         self.benchmark_file = "storage2020.yml"
-        self.install_loc = "http://magna002.ceph.redhat.com/spec_storage/"
+        self.install_loc = "http://9.114.193.232/spec_storage/"
 
     def _execute_checked(self, cmd, timeout=3600, long_running=False):
         """Run a command and fail fast when exit code is non-zero."""
