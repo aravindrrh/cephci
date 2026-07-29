@@ -38,12 +38,16 @@ PERM_RWX = "rwaxtcy"  # rwx -> rwaxtcy
 # Bulk ACL: named UIDs in [BULK_UID_START, BULK_UID_END] inclusive.
 # Spectrum Scale over NFS rejected ~800 named ``A::uid:`` ACEs (EINVAL); keep a
 # conservative count that still exceeds trivial single-ACE cases.
-BULK_UID_START = 1000
-BULK_UID_END = 1063
+# Start at 2100+ to avoid Onecloud (1000) / cephuser (1001) UID collisions.
+BULK_UID_START = 2100
+BULK_UID_END = 2163
 BULK_NAMED_COUNT = BULK_UID_END - BULK_UID_START + 1
 # Named UIDs used for spot checks / su -u access (must lie in the bulk range).
-BULK_SPOT_UID_1 = 1020
-BULK_SPOT_UID_2 = 1050
+BULK_SPOT_UID_1 = 2120
+BULK_SPOT_UID_2 = 2150
+# Standalone overwrite-ACE user (also within bulk range for passwd provisioning).
+BULK_OVERWRITE_UID = 2101
+BULK_OVERWRITE_USER = f"u{BULK_OVERWRITE_UID}"
 
 # Known issues: map test name (as it appears in the results table) to a
 # tracker reference.  Tests listed here are still executed and reported,
@@ -96,7 +100,7 @@ def run(ceph_cluster, **kw):
         acl.install_acl_tools()
 
         for node in (client, server_node):
-            NfsAcl.create_user(node, "u1001", 1001)
+            NfsAcl.create_user(node, BULK_OVERWRITE_USER, BULK_OVERWRITE_UID)
             NfsAcl.create_user(node, f"u{BULK_SPOT_UID_1}", BULK_SPOT_UID_1)
             NfsAcl.create_user(node, "u4000", 4000)
             NfsAcl.create_user(node, "u5000", 5000)
@@ -165,12 +169,17 @@ def run(ceph_cluster, **kw):
                     client, lo, hi, server_node=server_node
                 )
             for c in clients:
-                NfsAcl.delete_user(c, "u1001")
+                NfsAcl.delete_user(c, BULK_OVERWRITE_USER)
                 NfsAcl.delete_user(c, f"u{BULK_SPOT_UID_1}")
                 NfsAcl.delete_user(c, "u4000")
                 NfsAcl.delete_user(c, "u5000")
             if server_node:
-                for u in ("u1001", f"u{BULK_SPOT_UID_1}", "u4000", "u5000"):
+                for u in (
+                    BULK_OVERWRITE_USER,
+                    f"u{BULK_SPOT_UID_1}",
+                    "u4000",
+                    "u5000",
+                ):
                     NfsAcl.delete_user(server_node, u)
             teardown_gpfs_nfs(clients, nfs_mount)
             log.info("Cleanup completed")
@@ -393,8 +402,8 @@ def _test_overwrite_behaviour(acl):
     count_before = len(acl.get_acl("f1"))
     log.info("ACE count before overwrite: %d", count_before)
 
-    acl.set_acl("f1", "A::1001:wx")
-    if not acl.verify_acl_contains("f1", f"A::1001:{PERM_WX}"):
+    acl.set_acl("f1", f"A::{BULK_OVERWRITE_UID}:wx")
+    if not acl.verify_acl_contains("f1", f"A::{BULK_OVERWRITE_UID}:{PERM_WX}"):
         log.error("New ACE not found after overwrite")
         return 1
 
@@ -411,12 +420,16 @@ def _test_overwrite_behaviour(acl):
         return 1
 
     log.info(
-        "Access verification: u1001 should write; bulk named ACE for uid %s gone; "
-        "u1001 may still read via EVERYONE@ (not asserted)",
+        "Access verification: %s should write; bulk named ACE for uid %s gone; "
+        "%s may still read via EVERYONE@ (not asserted)",
+        BULK_OVERWRITE_USER,
         BULK_SPOT_UID_1,
+        BULK_OVERWRITE_USER,
     )
-    if not acl.verify_access("u1001", "f1", operation="write", expect_success=True):
-        log.error("u1001 denied write after overwrite to wx")
+    if not acl.verify_access(
+        BULK_OVERWRITE_USER, "f1", operation="write", expect_success=True
+    ):
+        log.error("%s denied write after overwrite to wx", BULK_OVERWRITE_USER)
         return 1
     if not acl.verify_acl_not_contains("f1", f"A::{BULK_SPOT_UID_1}:{PERM_RX}"):
         log.error(
@@ -527,16 +540,21 @@ def _test_scale_limit(acl):
     log.info("=== Test: Scale Limit ===")
     acl.create_file("f1")
     big_acl_file = "/tmp/acl_big.txt"
-    attempted_named = 4270 - 1000 + 1
+    # Same named-ACE count as old 1000-4270, shifted off Onecloud/cephuser UIDs.
+    limit_uid_start = 2100
+    limit_uid_end = 5370
+    attempted_named = limit_uid_end - limit_uid_start + 1
 
     log.info(
-        "Generating large GPFS-style ACL file (named UIDs 1000-4270 = %d entries)",
+        "Generating large GPFS-style ACL file (named UIDs %d-%d = %d entries)",
+        limit_uid_start,
+        limit_uid_end,
         attempted_named,
     )
     acl.generate_gpfs_bulk_acl_file(
         big_acl_file,
-        uid_start=1000,
-        uid_end=4270,
+        uid_start=limit_uid_start,
+        uid_end=limit_uid_end,
         named_perm=PERM_RX,
         deny_uids=(9998, 9999),
     )

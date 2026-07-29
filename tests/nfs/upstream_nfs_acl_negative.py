@@ -16,11 +16,12 @@ from utility.log import Log
 
 log = Log(__name__)
 
-TEST_UID_1 = 1001
+# UIDs in 2100+ avoid Onecloud (1000) / cephuser (1001) and their GIDs.
+TEST_UID_1 = 2101
 TEST_USER_1 = "user1"
-TEST_UID_2 = 2000
+TEST_UID_2 = 2102
 TEST_USER_2 = "user2"
-TEST_UID_3 = 2002
+TEST_UID_3 = 2103
 TEST_USER_3 = "user3"
 TEST_GID_1 = 3001
 TEST_GROUP_1 = "group1"
@@ -401,29 +402,33 @@ def _test_skip_symlink(acl):
     original_acl = acl.get_acl("real/f_real")
     log.info("Original ACL on real/f_real: %s", original_acl)
 
-    NfsAcl.create_user(acl.client, "user_1002", 1002)
-    acl.set_acl_recursive("d1", "A::1002:wx", follow_symlinks=False)
+    # Reuse TEST_USER_2 (already provisioned); do not create a second name on same UID.
+    acl.set_acl_recursive(
+        "d1", f"A::{TEST_UID_2}:wx", follow_symlinks=False
+    )
 
     current_acl = acl.get_acl("real/f_real")
     log.info("ACL on real/f_real after -P: %s", current_acl)
-    if any("1002" in entry for entry in current_acl):
+    if any(str(TEST_UID_2) in entry for entry in current_acl):
         log.error("Skip symlink (-P) failed: ACL was applied to symlink target")
-        NfsAcl.delete_user(acl.client, "user_1002")
         return 1
-    if not acl.verify_acl_not_contains("real/f_real", f"A::1002:{PERM_WX}"):
-        log.error("ACE for UID 1002 unexpectedly present on target after -P")
-        NfsAcl.delete_user(acl.client, "user_1002")
-        return 1
-
-    log.info("Access verification: user_1002 should NOT write to symlink target")
-    if not acl.verify_access(
-        "user_1002", "real/f_real", operation="write", expect_success=False
+    if not acl.verify_acl_not_contains(
+        "real/f_real", f"A::{TEST_UID_2}:{PERM_WX}"
     ):
-        log.error("user_1002 can write to symlink target despite -P skip")
-        NfsAcl.delete_user(acl.client, "user_1002")
+        log.error(
+            "ACE for UID %s unexpectedly present on target after -P", TEST_UID_2
+        )
         return 1
 
-    NfsAcl.delete_user(acl.client, "user_1002")
+    log.info(
+        "Access verification: %s should NOT write to symlink target", TEST_USER_2
+    )
+    if not acl.verify_access(
+        TEST_USER_2, "real/f_real", operation="write", expect_success=False
+    ):
+        log.error("%s can write to symlink target despite -P skip", TEST_USER_2)
+        return 1
+
     acl.cleanup_test_files("d1", "real")
     log.info("Skip Symlink (-P): PASSED")
     return 0
@@ -434,49 +439,55 @@ def _test_traversal_difference(acl):
     _setup_symlink_env(acl)
     acl.write_file("real/f_real", "traversal_diff_data")
 
-    NfsAcl.create_user(acl.client, "user_1002", 1002)
-
     log.info("Run -P (skip symlinks)")
-    acl.set_acl_recursive("d1", "A::1002:wx", follow_symlinks=False)
+    acl.set_acl_recursive(
+        "d1", f"A::{TEST_UID_2}:wx", follow_symlinks=False
+    )
     acl_after_p = acl.get_acl("real/f_real")
     log.info("ACL on real/f_real after -P: %s", acl_after_p)
-    if any("1002" in entry for entry in acl_after_p):
+    if any(str(TEST_UID_2) in entry for entry in acl_after_p):
         log.error("Traversal -P: ACL was unexpectedly applied to target")
-        NfsAcl.delete_user(acl.client, "user_1002")
         return 1
 
-    log.info("Access verification: user_1002 should NOT write to target after -P")
+    log.info(
+        "Access verification: %s should NOT write to target after -P", TEST_USER_2
+    )
     if not acl.verify_access(
-        "user_1002", "real/f_real", operation="write", expect_success=False
+        TEST_USER_2, "real/f_real", operation="write", expect_success=False
     ):
-        log.error("user_1002 can write to target after -P (should be denied)")
-        NfsAcl.delete_user(acl.client, "user_1002")
+        log.error(
+            "%s can write to target after -P (should be denied)", TEST_USER_2
+        )
         return 1
 
     log.info("Run -L (follow symlinks)")
-    acl.set_acl_recursive("d1", "A::1002:wx", follow_symlinks=True)
+    acl.set_acl_recursive(
+        "d1", f"A::{TEST_UID_2}:wx", follow_symlinks=True
+    )
     acl_after_l = acl.get_acl("real/f_real")
     log.info("ACL on real/f_real after -L: %s", acl_after_l)
-    if not any("1002" in entry for entry in acl_after_l):
+    if not any(str(TEST_UID_2) in entry for entry in acl_after_l):
         log.error("Traversal -L: ACL was NOT applied to target")
-        NfsAcl.delete_user(acl.client, "user_1002")
         return 1
 
-    if not acl.verify_acl_contains("real/f_real", f"A::1002:{PERM_WX}"):
-        log.error("ACE for UID 1002 not found after -L recursive set")
-        NfsAcl.delete_user(acl.client, "user_1002")
+    if not acl.verify_acl_contains("real/f_real", f"A::{TEST_UID_2}:{PERM_WX}"):
+        log.error(
+            "ACE for UID %s not found after -L recursive set", TEST_UID_2
+        )
         return 1
 
-    log.info("Access verification: user_1002 should now write to target after -L")
+    log.info(
+        "Access verification: %s should now write to target after -L", TEST_USER_2
+    )
     if not acl.verify_access(
-        "user_1002", "real/f_real", operation="write", expect_success=True
+        TEST_USER_2, "real/f_real", operation="write", expect_success=True
     ):
-        log.error("user_1002 cannot write to target after -L (should be allowed)")
-        NfsAcl.delete_user(acl.client, "user_1002")
+        log.error(
+            "%s cannot write to target after -L (should be allowed)", TEST_USER_2
+        )
         return 1
 
     log.info("Clear difference between -P (skip) and -L (follow) confirmed")
-    NfsAcl.delete_user(acl.client, "user_1002")
     acl.cleanup_test_files("d1", "real")
     log.info("Traversal Difference: PASSED")
     return 0

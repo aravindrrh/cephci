@@ -19,13 +19,14 @@ def run(ceph_cluster, **kw):
         if not should_skip_deployment(config):
             deploy_gpfs_scale(ceph_cluster, config)
 
-        # Perform mount on client
-        cmds = ["dnf -y install git wget gcc nfs-utils time make",
-                "mkdir -p /mnt/nfsv3",
-                f"mount -t nfs -o vers=3 {server.ip_address}:{export_name} /mnt/nfsv3",
-                "mkdir -p /mnt/nfsv4",
-                f"mount -t nfs -o vers=4 {server.ip_address}:{export_name} /mnt/nfsv4"
-                ]
+        # Mounts: umount first so reused clients with leftover mounts don't fail.
+        cmds = [
+            "dnf -y install git wget gcc nfs-utils time make",
+            "umount -fl /mnt/nfsv3 /mnt/nfsv4 2>/dev/null || true",
+            "mkdir -p /mnt/nfsv3 /mnt/nfsv4",
+            f"mount -t nfs -o vers=3 {server.ip_address}:{export_name} /mnt/nfsv3",
+            f"mount -t nfs -o vers=4 {server.ip_address}:{export_name} /mnt/nfsv4",
+        ]
 
         for cmd in cmds:
             clients[0].exec_command(cmd=cmd, sudo=True)
@@ -38,14 +39,17 @@ def run(ceph_cluster, **kw):
         clients[0].exec_command(cmd=cmd, sudo=True)
         clients[1].exec_command(cmd=cmd, sudo=True)
 
-        # clone LTP
-        cmd = "git clone https://github.com/linux-test-project/ltp.git"
-        cmd += " && git clone https://github.com/linux-test-project/kirk.git"
-        clients[0].exec_command(cmd=cmd, sudo=True)
-        clients[1].exec_command(cmd=cmd, sudo=True)
+        # Clone LTP + kirk under ~ (remove first — clients are reused across runs).
+        clone_cmd = (
+            "cd ~ && rm -rf ltp kirk && "
+            "git clone https://github.com/linux-test-project/ltp.git && "
+            "git clone https://github.com/linux-test-project/kirk.git"
+        )
+        clients[0].exec_command(cmd=clone_cmd, sudo=True)
+        clients[1].exec_command(cmd=clone_cmd, sudo=True)
 
         # Build LTP
-        cmd = "cd ltp;make autotools;./configure;make -j$(nproc);sudo make install"
+        cmd = "cd ~/ltp;make autotools;./configure;make -j$(nproc);sudo make install"
         clients[0].exec_command(cmd=cmd, sudo=True, timeout=600)
         clients[1].exec_command(cmd=cmd, sudo=True, timeout=600)
 

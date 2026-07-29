@@ -24,11 +24,12 @@ from utility.log import Log
 
 log = Log(__name__)
 
-TEST_UID_1 = 1001
+# UIDs in 2100+ avoid Onecloud (1000) / cephuser (1001) and their GIDs.
+TEST_UID_1 = 2101
 TEST_USER_1 = "user1"
-TEST_UID_2 = 1002
+TEST_UID_2 = 2102
 TEST_USER_2 = "user2"
-TEST_UID_3 = 2000
+TEST_UID_3 = 2103
 TEST_USER_3 = "user3"
 TEST_GID_1 = 3001
 TEST_GROUP_1 = "group1"
@@ -263,10 +264,10 @@ def _test_getattr_before_set(acl):
 
     log.info("Access verification: user1 should be able to read and write")
     if not acl.verify_access(TEST_USER_1, "f1", operation="read", expect_success=True):
-        log.error("User1 cannot read despite A::1001:rw ACL")
+        log.error("User1 cannot read despite A::%s:rw ACL", TEST_UID_1)
         return 1
     if not acl.verify_access(TEST_USER_1, "f1", operation="write", expect_success=True):
-        log.error("User1 cannot write despite A::1001:rw ACL")
+        log.error("User1 cannot write despite A::%s:rw ACL", TEST_UID_1)
         return 1
 
     log.info("GETATTR Before Set: PASSED")
@@ -314,13 +315,13 @@ def _test_full_replace(acl):
     acl.set_acl("f1", f"D::{TEST_UID_1}:rwatcy,A::{TEST_UID_2}:rw")
 
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_2}:{PERM_RW}"):
-        log.error("UID 1002 ACE not found after full replace")
+        log.error("UID %s ACE not found after full replace", TEST_UID_2)
         return 1
     if not acl.verify_acl_not_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
-        log.error("UID 1001 ACE still present after full replace")
+        log.error("UID %s ACE still present after full replace", TEST_UID_1)
         return 1
 
-    log.info("Access verification: user2 (UID 1002) should have rw access")
+    log.info("Access verification: user2 (UID %s) should have rw access", TEST_UID_2)
     if not acl.verify_access(TEST_USER_2, "f1", operation="read", expect_success=True):
         log.error("User2 cannot read after full replace")
         return 1
@@ -328,7 +329,10 @@ def _test_full_replace(acl):
         log.error("User2 cannot write after full replace")
         return 1
 
-    log.info("Access verification: user1 (UID 1001) should be denied after replace")
+    log.info(
+        "Access verification: user1 (UID %s) should be denied after replace",
+        TEST_UID_1,
+    )
     if not acl.verify_access(TEST_USER_1, "f1", operation="read", expect_success=False):
         log.error("User1 can still read after ACL was replaced away")
         return 1
@@ -349,18 +353,18 @@ def _test_incremental_add(acl):
     acl.add_acl("f1", f"A::{TEST_UID_2}:w")
 
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
-        log.error("Original ACE A::1001:r missing")
+        log.error("Original ACE A::%s:r missing", TEST_UID_1)
         return 1
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_2}:{PERM_W}"):
-        log.error("Added ACE A::1002:w not found")
+        log.error("Added ACE A::%s:w not found", TEST_UID_2)
         return 1
 
     log.info("Access verification: user1 can read, user2 can write")
     if not acl.verify_access(TEST_USER_1, "f1", operation="read", expect_success=True):
-        log.error("User1 cannot read despite A::1001:r ACE")
+        log.error("User1 cannot read despite A::%s:r ACE", TEST_UID_1)
         return 1
     if not acl.verify_access(TEST_USER_2, "f1", operation="write", expect_success=True):
-        log.error("User2 cannot write despite A::1002:w ACE")
+        log.error("User2 cannot write despite A::%s:w ACE", TEST_UID_2)
         return 1
 
     log.info("Incremental Add: PASSED")
@@ -724,7 +728,10 @@ def _test_acl_to_chmod(acl):
         log.error("ACL entries lost after mode check")
         return 1
 
-    log.info("Access verification: user1 should be able to read (has A::1001:r)")
+    log.info(
+        "Access verification: user1 should be able to read (has A::%s:r)",
+        TEST_UID_1,
+    )
     if not acl.verify_access(TEST_USER_1, "f1", operation="read", expect_success=True):
         log.error("User1 cannot read despite having read ACL")
         return 1
