@@ -26,13 +26,14 @@ TEST_USER_3 = "user3"
 TEST_GID_1 = 3001
 TEST_GROUP_1 = "group1"
 
-# NFSv4 expanded permission strings as returned by nfs4_getfacl.
+# NFSv4 expanded permission strings. Scale stores ACE perms verbatim;
+# compact aliases are not enough for real NFS opens (set via these forms).
 PERM_R = "rtcy"       # r   -> rtcy
 PERM_RX = "rxtcy"     # rx  -> rxtcy
 PERM_W = "watcy"      # w   -> watcy
 PERM_WX = "waxtcy"    # wx  -> waxtcy
 PERM_A = "atcy"       # a   -> atcy
-PERM_RW = "rwatcy"    # rw  -> rwatcy
+PERM_RW = "rwatcy"    # rw  -> rwatcy (required for allow-write)
 PERM_RWX = "rwaxtcy"  # rwx -> rwaxtcy
 
 # Known issues: map test name (as it appears in the results table) to a
@@ -191,7 +192,7 @@ def _test_atomic_failure(acl):
     log.info("=== Test: Atomic Failure ===")
     acl.create_file("f1")
     acl.write_file("f1", "atomic_failure_data")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:r")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_R}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
         log.error("ACE not found after set (before atomic failure)")
         return 1
@@ -238,7 +239,7 @@ def _test_deny_then_allow(acl):
     acl.write_file("f1", "deny_allow_test")
 
     log.info("Step 1: Set Deny ACE and verify via getfacl")
-    acl.set_acl("f1", f"D::{TEST_UID_1}:rx")
+    acl.set_acl("f1", f"D::{TEST_UID_1}:{PERM_RX}")
     acl_after_deny = acl.get_acl("f1")
     log.info("ACL after Deny: %s", acl_after_deny)
 
@@ -248,7 +249,7 @@ def _test_deny_then_allow(acl):
         return 1
 
     log.info("Step 3: Add Allow ACE (nfs4_setfacl -a prepends it before Deny)")
-    acl.add_acl("f1", f"A::{TEST_UID_1}:rx")
+    acl.add_acl("f1", f"A::{TEST_UID_1}:{PERM_RX}")
     acl_after_allow = acl.get_acl("f1")
     log.info("ACL after Allow added: %s", acl_after_allow)
 
@@ -290,7 +291,7 @@ def _test_append_only(acl):
 def _test_delete_denied(acl):
     log.info("=== Test: Delete Denied ===")
     acl.create_file("f1")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:wx")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_WX}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_WX}"):
         log.error("Write ACE not found after set")
         return 1
@@ -328,7 +329,7 @@ def _test_uid_mismatch(acl):
     acl.write_file("f1", "uid_mismatch_test")
     acl.set_acl(
         "f1",
-        f"D::{TEST_UID_2}:rwatcy,A::{TEST_UID_1}:rw",
+        f"D::{TEST_UID_2}:{PERM_RW},A::{TEST_UID_1}:{PERM_RW}",
     )
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_RW}"):
         log.error("RW ACE for UID %s not found after set", TEST_UID_1)
@@ -346,7 +347,7 @@ def _test_non_member_denied(acl):
     acl.write_file("f1", "non_member_test")
     acl.set_acl(
         "f1",
-        f"D::{TEST_UID_3}:rwatcy,A:g:{TEST_GID_1}:r",
+        f"D::{TEST_UID_3}:{PERM_RW},A:g:{TEST_GID_1}:{PERM_R}",
     )
     if not acl.verify_acl_contains("f1", f"A:g:{TEST_GID_1}:{PERM_R}"):
         log.error("Group read ACE for GID %s not found after set", TEST_GID_1)
@@ -369,7 +370,7 @@ def _test_uid_vs_gid_precedence(acl):
         TEST_UID_1,
         TEST_GID_1,
     )
-    acl.set_acl("f1", f"D::{TEST_UID_1}:rwatcy,A:g:{TEST_GID_1}:r")
+    acl.set_acl("f1", f"D::{TEST_UID_1}:{PERM_RW},A:g:{TEST_GID_1}:{PERM_R}")
     acl_after = acl.get_acl("f1")
     log.info("ACL after combined set: %s", acl_after)
 
@@ -404,7 +405,7 @@ def _test_skip_symlink(acl):
 
     # Reuse TEST_USER_2 (already provisioned); do not create a second name on same UID.
     acl.set_acl_recursive(
-        "d1", f"A::{TEST_UID_2}:wx", follow_symlinks=False
+        "d1", f"A::{TEST_UID_2}:{PERM_WX}", follow_symlinks=False
     )
 
     current_acl = acl.get_acl("real/f_real")
@@ -441,7 +442,7 @@ def _test_traversal_difference(acl):
 
     log.info("Run -P (skip symlinks)")
     acl.set_acl_recursive(
-        "d1", f"A::{TEST_UID_2}:wx", follow_symlinks=False
+        "d1", f"A::{TEST_UID_2}:{PERM_WX}", follow_symlinks=False
     )
     acl_after_p = acl.get_acl("real/f_real")
     log.info("ACL on real/f_real after -P: %s", acl_after_p)
@@ -462,7 +463,7 @@ def _test_traversal_difference(acl):
 
     log.info("Run -L (follow symlinks)")
     acl.set_acl_recursive(
-        "d1", f"A::{TEST_UID_2}:wx", follow_symlinks=True
+        "d1", f"A::{TEST_UID_2}:{PERM_WX}", follow_symlinks=True
     )
     acl_after_l = acl.get_acl("real/f_real")
     log.info("ACL on real/f_real after -L: %s", acl_after_l)

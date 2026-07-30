@@ -11,7 +11,7 @@ Usage
 
     acl = NfsAcl(client, mount_point="/mnt/nfs")
     acl.install_acl_tools()
-    acl.set_acl("f1", "A::2101:rw")
+    acl.set_acl("f1", "A::2101:rwatcy")
     entries = acl.get_acl("f1")
 """
 
@@ -126,12 +126,13 @@ class NfsAcl:
         Expand shorthand permission aliases in a comma-separated ACE spec.
 
         Spectrum Scale stores permission strings verbatim rather than expanding
-        aliases.  Passing ``A::2101:rw`` stores only READ_DATA and WRITE_DATA,
-        omitting READ_ATTRIBUTES (``t``) which is required to open a file,
-        causing EPERM on real access.
+        aliases.  Compact ``rw`` is NOT enough for a real NFS write open on
+        Scale/Ganesha — needs ``rwatcy`` (attrs/acl/sync bits).  Compact ``r``
+        similarly omits bits needed for a reliable open.  Always expand before
+        ``nfs4_setfacl``.
 
-        This method handles both single ACEs (``A::2101:rw``) and
-        comma-separated multi-ACE specs (``D::2103:rw,A::2101:rw``).
+        Handles single ACEs (``A::2101:rw``) and comma-separated multi-ACE
+        specs (``D::2103:rw,A::2101:rw``).
         """
         alias_map = {"r": "rtcy", "w": "watcy", "a": "atcy", "x": "xtcy"}
         result = []

@@ -36,14 +36,13 @@ TEST_GROUP_1 = "group1"
 TEST_GID_2 = 3002
 TEST_GROUP_2 = "group2"
 
-# NFSv4 expanded permission strings as returned by a standard nfs4_getfacl.
-# nfs4_setfacl accepts short aliases (r, rw, rwx) but standard kernel NFS
-# servers return the full permission bits.  Spectrum Scale returns the alias
-# verbatim; the NfsAcl helper normalises both forms before comparison, so
-# these constants work regardless of which representation the server uses.
+# NFSv4 expanded permission strings.  Spectrum Scale stores ACE perms
+# verbatim: compact ``rw`` does NOT grant a usable NFS write open (needs
+# ``rwatcy``).  Always set ACLs with these expanded forms (NfsAcl.set_acl
+# also expands aliases as a safety net).  Compare helpers accept both.
 PERM_R = "rtcy"  # r   -> rtcy
 PERM_W = "watcy"  # w   -> watcy
-PERM_RW = "rwatcy"  # rw  -> rwatcy
+PERM_RW = "rwatcy"  # rw  -> rwatcy  (required for allow-write on Scale)
 PERM_RWX = "rwaxtcy"  # rwx -> rwaxtcy
 PERM_RX = "rxtcy"  # rx  -> rxtcy
 
@@ -257,17 +256,17 @@ def _test_getattr_before_set(acl):
         log.error("Expected default ACL entries but got none")
         return 1
 
-    acl.set_acl("f1", f"A::{TEST_UID_1}:rw")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_RW}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_RW}"):
         log.error("ACL was not updated after nfs4_setfacl")
         return 1
 
     log.info("Access verification: user1 should be able to read and write")
     if not acl.verify_access(TEST_USER_1, "f1", operation="read", expect_success=True):
-        log.error("User1 cannot read despite A::%s:rw ACL", TEST_UID_1)
+        log.error("User1 cannot read despite A::%s:%s ACL", TEST_UID_1, PERM_RW)
         return 1
     if not acl.verify_access(TEST_USER_1, "f1", operation="write", expect_success=True):
-        log.error("User1 cannot write despite A::%s:rw ACL", TEST_UID_1)
+        log.error("User1 cannot write despite A::%s:%s ACL", TEST_UID_1, PERM_RW)
         return 1
 
     log.info("GETATTR Before Set: PASSED")
@@ -280,7 +279,7 @@ def _test_setattr_getattr(acl):
     acl.write_file("f1", "setattr_test_data")
     acl.set_acl(
         "f1",
-        f"D::{TEST_UID_3}:rwatcy,A::{TEST_UID_1}:rw",
+        f"D::{TEST_UID_3}:{PERM_RW},A::{TEST_UID_1}:{PERM_RW}",
     )
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_RW}"):
         log.error("ACL not stored/retrieved correctly")
@@ -288,10 +287,10 @@ def _test_setattr_getattr(acl):
 
     log.info("Access verification: user1 should read and write")
     if not acl.verify_access(TEST_USER_1, "f1", operation="read", expect_success=True):
-        log.error("User1 read failed despite rw ACL")
+        log.error("User1 read failed despite %s ACL", PERM_RW)
         return 1
     if not acl.verify_access(TEST_USER_1, "f1", operation="write", expect_success=True):
-        log.error("User1 write failed despite rw ACL")
+        log.error("User1 write failed despite %s ACL", PERM_RW)
         return 1
 
     log.info("Access verification: user3 (different UID) should be denied")
@@ -307,12 +306,12 @@ def _test_full_replace(acl):
     log.info("=== Test: Full Replace (-s) ===")
     acl.create_file("f1")
     acl.write_file("f1", "full_replace_data")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:r")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_R}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
         log.error("Initial ACE A::%s:r not set before replace", TEST_UID_1)
         return 1
 
-    acl.set_acl("f1", f"D::{TEST_UID_1}:rwatcy,A::{TEST_UID_2}:rw")
+    acl.set_acl("f1", f"D::{TEST_UID_1}:{PERM_RW},A::{TEST_UID_2}:{PERM_RW}")
 
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_2}:{PERM_RW}"):
         log.error("UID %s ACE not found after full replace", TEST_UID_2)
@@ -345,12 +344,12 @@ def _test_incremental_add(acl):
     log.info("=== Test: Incremental (-a) ===")
     acl.create_file("f1")
     acl.write_file("f1", "incremental_data")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:r")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_R}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
         log.error("Initial ACE not set before incremental add")
         return 1
 
-    acl.add_acl("f1", f"A::{TEST_UID_2}:w")
+    acl.add_acl("f1", f"A::{TEST_UID_2}:{PERM_W}")
 
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
         log.error("Original ACE A::%s:r missing", TEST_UID_1)
@@ -375,14 +374,14 @@ def _test_spec_file_apply(acl):
     log.info("=== Test: Spec File Apply ===")
     acl.create_file("f1")
     acl.write_file("f1", "spec_file_data")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:r")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_R}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
         log.error("Initial ACE not set before spec file apply")
         return 1
 
     spec_file = "/tmp/acl_spec_test.txt"
     acl.save_acl_to_file("f1", spec_file)
-    extra_ace = NfsAcl._expand_ace_perms(f"A::{TEST_UID_2}:rw")
+    extra_ace = f"A::{TEST_UID_2}:{PERM_RW}"
     acl.client.exec_command(sudo=True, cmd=f"printf '%s\\n' '{extra_ace}' >> {spec_file}")
     acl.set_acl_from_file("f1", spec_file)
 
@@ -420,7 +419,7 @@ def _test_allow_then_deny(acl):
     acl.write_file("f1", "allow_deny_test")
 
     log.info("Step 1: Set Allow ACE and verify via getfacl")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:rw")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_RW}")
     acl_after_allow = acl.get_acl("f1")
     log.info("ACL after Allow: %s", acl_after_allow)
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_RW}"):
@@ -436,7 +435,7 @@ def _test_allow_then_deny(acl):
         return 1
 
     log.info("Step 2: Add Deny ACE and verify via getfacl")
-    acl.add_acl("f1", f"D::{TEST_UID_1}:w")
+    acl.add_acl("f1", f"D::{TEST_UID_1}:{PERM_W}")
     acl_after_deny = acl.get_acl("f1")
     log.info("ACL after Deny added: %s", acl_after_deny)
 
@@ -464,7 +463,7 @@ def _test_allow_then_deny(acl):
 def _test_read_permission(acl):
     log.info("=== Test: Read Permission ===")
     acl.write_file("f1", "hello")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:r")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_R}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
         log.error("Read ACE not found after set")
         return 1
@@ -479,7 +478,7 @@ def _test_read_permission(acl):
 def _test_write_permission(acl):
     log.info("=== Test: Write Permission ===")
     acl.create_file("f1")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:w")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_W}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_W}"):
         log.error("Write ACE not found after set")
         return 1
@@ -499,7 +498,7 @@ def _test_write_permission(acl):
 def _test_uid_match(acl):
     log.info("=== Test: UID Match ===")
     acl.write_file("f1", "uid_match_test")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:rw")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_RW}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_RW}"):
         log.error("UID match ACE not found after set")
         return 1
@@ -515,7 +514,7 @@ def _test_non_existent_uid(acl):
     log.info("=== Test: Non-existent UID ===")
     acl.create_file("f1")
     acl.write_file("f1", "non_existent_uid_data")
-    acl.set_acl("f1", f"D::{TEST_UID_3}:rwatcy,A::9999:rw")
+    acl.set_acl("f1", f"D::{TEST_UID_3}:{PERM_RW},A::9999:{PERM_RW}")
 
     if not acl.verify_acl_contains("f1", f"A::9999:{PERM_RW}"):
         log.error("ACL for non-existent UID not stored")
@@ -533,7 +532,7 @@ def _test_non_existent_uid(acl):
 def _test_gid_based_access(acl):
     log.info("=== Test: GID-based Access ===")
     acl.write_file("f1", "gid_access_test")
-    acl.set_acl("f1", f"A:g:{TEST_GID_1}:r")
+    acl.set_acl("f1", f"A:g:{TEST_GID_1}:{PERM_R}")
 
     if not acl.verify_acl_contains("f1", f"A:g:{TEST_GID_1}:{PERM_R}"):
         log.error("GID ACE not found after set")
@@ -549,8 +548,8 @@ def _test_gid_based_access(acl):
 def _test_multiple_groups(acl):
     log.info("=== Test: Multiple Groups ===")
     acl.write_file("f1", "multi_group_test")
-    acl.set_acl("f1", f"A:g:{TEST_GID_1}:r")
-    acl.add_acl("f1", f"A:g:{TEST_GID_2}:w")
+    acl.set_acl("f1", f"A:g:{TEST_GID_1}:{PERM_R}")
+    acl.add_acl("f1", f"A:g:{TEST_GID_2}:{PERM_W}")
 
     if not acl.verify_acl_contains("f1", f"A:g:{TEST_GID_1}:{PERM_R}"):
         log.error("GID1 ACE not found after set")
@@ -577,7 +576,7 @@ def _test_file_inherit(acl):
     log.info("=== Test: FILE_INHERIT ===")
     acl.cleanup_test_files("d1")
     acl.create_dir("d1")
-    acl.set_acl("d1", f"A:f:{TEST_UID_1}:rwx")
+    acl.set_acl("d1", f"A:f:{TEST_UID_1}:{PERM_RWX}")
 
     if not acl.verify_acl_contains("d1", f"A:f:{TEST_UID_1}:{PERM_RWX}"):
         log.error("FILE_INHERIT ACE not found on parent dir after set")
@@ -608,7 +607,7 @@ def _test_dir_inherit(acl):
     log.info("=== Test: DIR_INHERIT ===")
     acl.cleanup_test_files("d1")
     acl.create_dir("d1")
-    acl.set_acl("d1", f"A:d:{TEST_UID_1}:rwx")
+    acl.set_acl("d1", f"A:d:{TEST_UID_1}:{PERM_RWX}")
 
     if not acl.verify_acl_contains("d1", f"A:d:{TEST_UID_1}:{PERM_RWX}"):
         log.error("DIR_INHERIT ACE not found on parent dir after set")
@@ -642,7 +641,7 @@ def _test_no_propagate(acl):
     log.info("=== Test: NO_PROPAGATE ===")
     acl.cleanup_test_files("d1")
     acl.create_dir("d1")
-    acl.set_acl("d1", f"A:nfd:{TEST_UID_1}:rwx")
+    acl.set_acl("d1", f"A:nfd:{TEST_UID_1}:{PERM_RWX}")
     if not acl.verify_acl_contains("d1", f"A:nfd:{TEST_UID_1}:{PERM_RWX}"):
         log.error("NO_PROPAGATE ACE not found on parent dir after set")
         return 1
@@ -680,7 +679,7 @@ def _test_inherit_only(acl):
     acl.create_dir("d1")
     # GPFS rejects inherit-only without file/dir inheritance context.
     # Use fdi so the ACE is inheritance-only and applies to both files/dirs.
-    acl.set_acl("d1", f"A:fdi:{TEST_UID_1}:rwx")
+    acl.set_acl("d1", f"A:fdi:{TEST_UID_1}:{PERM_RWX}")
     acl_entries = acl.get_acl("d1")
     if not any(
         str(TEST_UID_1) in entry and "i" in entry.split(":")[1].lower()
@@ -710,9 +709,9 @@ def _test_acl_to_chmod(acl):
     log.info("=== Test: ACL to chmod ===")
     acl.create_file("f1")
     acl.write_file("f1", "acl_to_chmod_data")
-    acl.set_acl("f1", "A::OWNER@:rwx")
+    acl.set_acl("f1", f"A::OWNER@:{PERM_RWX}")
 
-    acl.add_acl("f1", f"A::{TEST_UID_1}:r")
+    acl.add_acl("f1", f"A::{TEST_UID_1}:{PERM_R}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_R}"):
         log.error("User1 read ACE not found after add")
         return 1
@@ -744,7 +743,7 @@ def _test_chmod_to_acl(acl):
     log.info("=== Test: chmod to ACL ===")
     acl.create_file("f1")
     acl.write_file("f1", "chmod_to_acl_data")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:rwx")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_RWX}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_RWX}"):
         log.error("rwx ACE not found after set (before chmod)")
         return 1
@@ -807,7 +806,7 @@ def _test_follow_symlink(acl):
 
     # override with read and execute permission because without x, user will not be able to traverse the directory
     # test may fail if we provide only read permission
-    acl.set_acl_recursive("d1", f"A::{TEST_UID_2}:rx", follow_symlinks=True)
+    acl.set_acl_recursive("d1", f"A::{TEST_UID_2}:{PERM_RX}", follow_symlinks=True)
 
     if not acl.verify_acl_contains("real/f_real", f"A::{TEST_UID_2}:{PERM_RX}"):
         log.error("Follow symlink (-L) failed: ACL not applied to symlink target")
@@ -854,7 +853,7 @@ def _test_apply_recursive(acl):
     acl.write_file("d1/f1", "recursive_data_f1")
     acl.create_file("d1/d2/f2")
     acl.write_file("d1/d2/f2", "recursive_data_f2")
-    acl.set_acl_recursive("d1", f"A::{TEST_UID_1}:rwx")
+    acl.set_acl_recursive("d1", f"A::{TEST_UID_1}:{PERM_RWX}")
 
     if not acl.verify_acl_contains("d1/f1", f"A::{TEST_UID_1}:{PERM_RWX}"):
         log.error("Recursive ACL not applied to d1/f1")
@@ -867,12 +866,12 @@ def _test_apply_recursive(acl):
     if not acl.verify_access(
         TEST_USER_1, "d1/f1", operation="read", expect_success=True
     ):
-        log.error("User1 cannot read d1/f1 despite recursive rwx ACL")
+        log.error("User1 cannot read d1/f1 despite recursive %s ACL", PERM_RWX)
         return 1
     if not acl.verify_access(
         TEST_USER_1, "d1/d2/f2", operation="read", expect_success=True
     ):
-        log.error("User1 cannot read d1/d2/f2 despite recursive rwx ACL")
+        log.error("User1 cannot read d1/d2/f2 despite recursive %s ACL", PERM_RWX)
         return 1
 
     acl.cleanup_test_files("d1")
@@ -886,14 +885,14 @@ def _test_override_existing(acl):
     acl.create_dir("d1/d2")
     acl.create_file("d1/d2/f2")
     acl.write_file("d1/d2/f2", "override_data")
-    acl.set_acl_recursive("d1", f"A::{TEST_UID_1}:rwx")
+    acl.set_acl_recursive("d1", f"A::{TEST_UID_1}:{PERM_RWX}")
     if not acl.verify_acl_contains("d1/d2/f2", f"A::{TEST_UID_1}:{PERM_RWX}"):
         log.error("Initial recursive ACL not applied before override")
         return 1
 
     # override with read and execute permission because without x, user will not be able to traverse the directory
     # test may fail if we provide only read permission
-    acl.set_acl_recursive("d1", f"A::{TEST_UID_2}:rx")
+    acl.set_acl_recursive("d1", f"A::{TEST_UID_2}:{PERM_RX}")
 
     if not acl.verify_acl_contains("d1/d2/f2", f"A::{TEST_UID_2}:{PERM_RX}"):
         log.error("New ACL not found after override")
@@ -927,18 +926,18 @@ def _test_mixed_existing(acl):
     acl.write_file("d1/f1", "mixed_data_f1")
     acl.create_file("d1/d2/f2")
     acl.write_file("d1/d2/f2", "mixed_data_f2")
-    acl.set_acl("d1/f1", f"A::{TEST_UID_1}:rwx")
+    acl.set_acl("d1/f1", f"A::{TEST_UID_1}:{PERM_RWX}")
     if not acl.verify_acl_contains("d1/f1", f"A::{TEST_UID_1}:{PERM_RWX}"):
         log.error("Initial ACE on d1/f1 not set")
         return 1
-    acl.set_acl("d1/d2/f2", f"A::{TEST_UID_2}:w")
+    acl.set_acl("d1/d2/f2", f"A::{TEST_UID_2}:{PERM_W}")
     if not acl.verify_acl_contains("d1/d2/f2", f"A::{TEST_UID_2}:{PERM_W}"):
         log.error("Initial ACE on d1/d2/f2 not set")
         return 1
 
     # override with read and execute permission because without x, user will not be able to traverse the directory
     # test may fail if we provide only read permission
-    acl.set_acl_recursive("d1", f"A::{TEST_UID_1}:rx")
+    acl.set_acl_recursive("d1", f"A::{TEST_UID_1}:{PERM_RX}")
 
     if not acl.verify_acl_contains("d1/f1", f"A::{TEST_UID_1}:{PERM_RX}"):
         log.error("d1/f1 not normalized")
@@ -983,7 +982,7 @@ def _test_rename(acl):
     log.info("=== Test: Rename Persistence ===")
     acl.create_file("f1")
     acl.write_file("f1", "rename_test_data")
-    acl.set_acl("f1", f"A::{TEST_UID_1}:rw")
+    acl.set_acl("f1", f"A::{TEST_UID_1}:{PERM_RW}")
     if not acl.verify_acl_contains("f1", f"A::{TEST_UID_1}:{PERM_RW}"):
         log.error("ACE not found after set (before rename)")
         return 1
@@ -1017,7 +1016,7 @@ def _test_hard_link(acl):
     log.info("=== Test: Hard Link Persistence ===")
     acl.create_file("f2")
     acl.write_file("f2", "hardlink_test_data")
-    acl.set_acl("f2", f"A::{TEST_UID_1}:rw")
+    acl.set_acl("f2", f"A::{TEST_UID_1}:{PERM_RW}")
     if not acl.verify_acl_contains("f2", f"A::{TEST_UID_1}:{PERM_RW}"):
         log.error("ACE not found after set (before hard link)")
         return 1
@@ -1051,7 +1050,7 @@ def _test_restart(acl, server_node):
     log.info("=== Test: Restart Persistence ===")
     acl.create_file("f2")
     acl.write_file("f2", "restart_test_data")
-    acl.set_acl("f2", f"A::{TEST_UID_1}:rw")
+    acl.set_acl("f2", f"A::{TEST_UID_1}:{PERM_RW}")
     if not acl.verify_acl_contains("f2", f"A::{TEST_UID_1}:{PERM_RW}"):
         log.error("ACE not found after set (before restart)")
         return 1
@@ -1086,7 +1085,7 @@ def _test_reboot(acl, nfs_node):
     log.info("=== Test: Reboot Persistence ===")
     acl.create_file("f2")
     acl.write_file("f2", "reboot_test_data")
-    acl.set_acl("f2", f"A::{TEST_UID_1}:rw")
+    acl.set_acl("f2", f"A::{TEST_UID_1}:{PERM_RW}")
     if not acl.verify_acl_contains("f2", f"A::{TEST_UID_1}:{PERM_RW}"):
         log.error("ACE not found after set (before reboot)")
         return 1

@@ -11,7 +11,8 @@ Config defaults match basic-storage-scale-multi-node.sh:
   gerrit_refspec=refs/heads/next
 
 Before cmake/rpmbuild, applies scale_acl_fix.patch (setfsuid/setfsgid)
-so non-root NFSv4 ACL checks work on GPFS.
+so non-root NFSv4 ACL checks work on GPFS. After install, verifies the
+symbol is present in libganesha_nfsd.so.
 """
 
 import shlex
@@ -259,6 +260,8 @@ def build_install_ganesha(ceph_cluster, config=None):
     _run(node, f"bash -lc {shlex.quote(fetch_script)}", timeout=timeout)
 
     # Required for non-root ACL tests on Scale; fail hard if context drifted.
+    # Dirty working-tree apply is enough — CPack packages the filesystem tree
+    # (ci-tests never commits; we verified setfsuid in tarball + installed .so).
     patch_path = "/tmp/scale_acl_fix.patch"
     patch_url_q = shlex.quote(SCALE_ACL_FIX_PATCH_URL)
     patch_path_q = shlex.quote(patch_path)
@@ -266,7 +269,8 @@ def build_install_ganesha(ceph_cluster, config=None):
         f"cd {clone_dir} && "
         f"(curl -fsSL -o {patch_path_q} {patch_url_q} || "
         f"wget -q -O {patch_path_q} {patch_url_q}) && "
-        f"git apply --verbose {patch_path_q}"
+        f"git apply --verbose {patch_path_q} && "
+        "grep -q setfsuid src/os/linux/subr.c"
     )
     log.info(
         "Applying Scale ACL fix patch on %s (setfsuid/setfsgid)", node.hostname
@@ -277,12 +281,17 @@ def build_install_ganesha(ceph_cluster, config=None):
     # /var/mmfs/ces/nfs-config while CCR still has the objects).
     _run(node, "systemctl stop nfs-ganesha || true", timeout=timeout, check=False)
 
-    # Build RPMs into <clone>/build/{x86_64,noarch}/ (not build/nfs-ganesha/build/).
+    # Same recipe as ci-tests basic-storage-scale.sh (no tarball rewrite —
+    # overlaying src/ into the CPack tarball adds a second .spec and breaks
+    # rpmbuild -ta with "Found more than one spec file").
     build_script = (
         f"cd {clone_dir} && mkdir -p build && cd build && "
         "cmake -DCMAKE_BUILD_TYPE=Maintainer -DUSE_FSAL_GPFS=ON -DUSE_DBUS=ON "
         "-D_MSPAC_SUPPORT=OFF -DMONITORING=ON -DUSE_MONITORING=ON ../src && "
         "make dist && "
+        "tar xOf nfs-ganesha-*.tar.gz --wildcards '*/os/linux/subr.c' "
+        "| grep -q setfsuid || "
+        "{ echo 'ERROR: setfsuid missing from make dist tarball' >&2; exit 1; } && "
         'rpmbuild -ta --define "_srcrpmdir $PWD" --define "_rpmdir $PWD" *.tar.gz'
     )
     _run(node, f"bash -lc {shlex.quote(build_script)}", timeout=timeout)
@@ -304,6 +313,19 @@ def build_install_ganesha(ceph_cluster, config=None):
         'test -n "$rpms" && dnf -y install $rpms'
     )
     _run(node, f"bash -lc {shlex.quote(install_script)}", timeout=timeout)
+
+    # Fail deploy if the installed shared lib still has no setfsuid (patch lost).
+    verify_script = (
+        "lib=$(ls /lib64/libganesha_nfsd.so* /usr/lib64/libganesha_nfsd.so* "
+        "2>/dev/null | head -1); "
+        'test -n "$lib" || { echo "ERROR: libganesha_nfsd.so not found" >&2; exit 1; }; '
+        'echo "Checking setfsuid in $lib"; '
+        'nm -D "$lib" | grep -E "setfsuid|setfsgid" || '
+        "{ echo \"ERROR: $lib has no setfsuid/setfsgid - ACL patch not in build\" >&2; "
+        "exit 1; }"
+    )
+    log.info("Verifying Scale ACL fix is present in installed libganesha_nfsd.so")
+    _run(node, f"bash -lc {shlex.quote(verify_script)}", timeout=60)
 
     _run(
         node,
@@ -368,7 +390,9 @@ def create_nfs_export(ceph_cluster, config=None):
         check=False,
     )
     # Create export subdir on the Scale FS (never export FS root — CES/HA live there).
-    _run(node, f"mkdir -p {nfs_export}", timeout=timeout)
+    # chmod 755: root umask often leaves 750; without other+x, non-root ACL allow
+    # tests fail path walk (Permission denied) even with correct file ACEs / setfsuid.
+    _run(node, f"mkdir -p {nfs_export} && chmod 755 {nfs_export}", timeout=timeout)
     # Idempotent: reuse path leaves the Scale export in place across runs.
     _run(
         node,
