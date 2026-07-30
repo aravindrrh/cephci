@@ -15,6 +15,7 @@ Usage
     entries = acl.get_acl("f1")
 """
 
+import shlex
 from time import sleep
 
 from utility.log import Log
@@ -88,11 +89,14 @@ class NfsAcl:
         self.client.exec_command(sudo=True, cmd=f"ln -sfn {target_path} {link_path}")
 
     def create_hardlink(self, src, dest):
-        """Create a hard link *dest* pointing to *src*."""
+        """Create a hard link *dest* pointing to *src* (replace dest if present)."""
         src_path = self._full_path(src)
         dest_path = self._full_path(dest)
         log.info("Creating hard link %s -> %s", dest_path, src_path)
-        self.client.exec_command(sudo=True, cmd=f"ln {src_path} {dest_path}")
+        # Stale f3 from a prior run causes "File exists"; remove first.
+        self.client.exec_command(
+            sudo=True, cmd=f"rm -f {dest_path} && ln {src_path} {dest_path}"
+        )
 
     def rename(self, old_name, new_name):
         """Rename / move a file."""
@@ -341,21 +345,54 @@ class NfsAcl:
 
     @staticmethod
     def create_user(client, username, uid):
-        """Create a local user with the given UID; no-op if exists."""
+        """
+        Ensure *username* exists with *uid*.
+
+        Why not ``id -u name || useradd -u uid``: the name may be missing while
+        *uid* is already taken (e.g. leftover ``u2101`` from manual probes),
+        which yields ``useradd: UID … is not unique``. Free the UID holder if
+        it is a different name, then create/recreate the test user.
+        """
         log.info("Creating user %s (uid=%s) on %s", username, uid, client.hostname)
-        client.exec_command(
-            sudo=True,
-            cmd=f"id -u {username} &>/dev/null || useradd -u {uid} {username}",
+        # Quote via simple tokens — username/uid come from test constants.
+        script = (
+            f"name={username}; uid={uid}; "
+            'if id -u "$name" &>/dev/null; then '
+            '  cur=$(id -u "$name"); '
+            '  if [ "$cur" = "$uid" ]; then exit 0; fi; '
+            '  userdel -rf "$name" || true; '
+            "fi; "
+            'holder=$(getent passwd "$uid" | cut -d: -f1 || true); '
+            'if [ -n "$holder" ] && [ "$holder" != "$name" ]; then '
+            '  userdel -rf "$holder" || true; '
+            "fi; "
+            'useradd -u "$uid" "$name"'
         )
+        client.exec_command(sudo=True, cmd=f"bash -lc {shlex.quote(script)}")
 
     @staticmethod
     def create_group(client, groupname, gid):
-        """Create a local group with the given GID; no-op if exists."""
+        """
+        Ensure *groupname* exists with *gid*.
+
+        Same UID-collision pattern as create_user: free a foreign GID holder
+        before groupadd.
+        """
         log.info("Creating group %s (gid=%s) on %s", groupname, gid, client.hostname)
-        client.exec_command(
-            sudo=True,
-            cmd=f"getent group {groupname} &>/dev/null || groupadd -g {gid} {groupname}",
+        script = (
+            f"name={groupname}; gid={gid}; "
+            'if getent group "$name" &>/dev/null; then '
+            '  cur=$(getent group "$name" | cut -d: -f3); '
+            '  if [ "$cur" = "$gid" ]; then exit 0; fi; '
+            '  groupdel "$name" || true; '
+            "fi; "
+            'holder=$(getent group "$gid" | cut -d: -f1 || true); '
+            'if [ -n "$holder" ] && [ "$holder" != "$name" ]; then '
+            '  groupdel "$holder" || true; '
+            "fi; "
+            'groupadd -g "$gid" "$name"'
         )
+        client.exec_command(sudo=True, cmd=f"bash -lc {shlex.quote(script)}")
 
     @staticmethod
     def add_user_to_group(client, username, groupname):
