@@ -1,159 +1,144 @@
+"""
+Kill lock-stress processes under load (client-side), not Ganesha crashes.
+
+Builds read/write lock binaries, runs them under mount subdirs, randomly
+pkills readers or writers for *duration* seconds.
+"""
+
+import shlex
+
+from tests.nfs.lib.spectrum_scale_custom_cases import (
+    build_lock_binaries,
+    cleanup_mount,
+    merge_custom_config,
+    prepare_mount,
+    write_remote,
+)
 from utility.log import Log
 
 log = Log(__name__)
 
-
-def run(ceph_cluster, **kw):
-    """Verify scale upstream with custom test scenarios
-    Args:
-        **kw: Key/value pairs of configuration information to be used in the test.
-    """
-    server = ceph_cluster.get_nodes("installer")[0]
-    client = ceph_cluster.get_nodes("client")[0]
-
-
-
-    mount_path = "/mnt/nfsv4"
-    EXPORT = "/ibm/scale_volume/export1"
-
-    # Test Scenario : 2
-    test_file = """#!/bin/bash
-
-if [ $# -ne 1 ]; then
-   echo "Usage: $0 <directory-path>"
-   exit 1
-fi
-
+_START_TEST_SH = r"""#!/bin/bash
+# Usage: start_test.sh <directory> <read_bin> <write_bin>
 DIR=$1
+READ_BIN=$2
+WRITE_BIN=$3
 SCRIPT_START=$(date +%s)
 PIDS=()
 loop_counter=1
 
-# Cleanup on exit
 cleanup() {
-   echo ""
-   echo "Cleaning up..."
    for pid in "${PIDS[@]}"; do
-       if kill -0 "$pid" 2>/dev/null; then
-           kill -9 "$pid"
-       fi
+       kill -9 "$pid" 2>/dev/null || true
    done
-
-   pkill -f "read_lookc_thr $DIR"
-   pkill -f "write_lookc_thr $DIR"
-
-   SCRIPT_END=$(date +%s)
-   TOTAL_RUNTIME=$((SCRIPT_END - SCRIPT_START))
-   echo "==== Script terminated ===="
-   echo "Total script runtime: ${TOTAL_RUNTIME}s"
+   pkill -f "$READ_BIN $DIR" 2>/dev/null || true
+   pkill -f "$WRITE_BIN $DIR" 2>/dev/null || true
    exit 0
 }
-
 trap cleanup SIGINT SIGTERM
 
-# Start initial read process
-./read_lookc_thr "$DIR" > /dev/null 2>&1 &
+"$READ_BIN" "$DIR" 3600 > /dev/null 2>&1 &
 PIDS+=($!)
-echo "Started initial read_lookc_thr in background (PID: $!)"
 
 while true; do
-   LOOP_START=$(date +%s)
-
-   echo "----- Loop $loop_counter -----"
-
-   ./read_lookc_thr "$DIR" > /dev/null 2>&1 &
+   "$READ_BIN" "$DIR" 3600 > /dev/null 2>&1 &
    PIDS+=($!)
-   ./write_lookc_thr "$DIR" > /dev/null 2>&1 &
+   "$WRITE_BIN" "$DIR" 3600 > /dev/null 2>&1 &
    PIDS+=($!)
-
    sleep 2
-
    if (( RANDOM % 2 == 0 )); then
-       echo "Killing all read_lookc_thr processes..."
-       pkill -f "read_lookc_thr $DIR"
+       pkill -f "$READ_BIN $DIR" 2>/dev/null || true
    else
-       echo "Killing all write_lookc_thr processes..."
-       pkill -f "write_lookc_thr $DIR"
+       pkill -f "$WRITE_BIN $DIR" 2>/dev/null || true
    fi
-
-   LOOP_END=$(date +%s)
-   SCRIPT_NOW=$(date +%s)
-   LOOP_RUNTIME=$((LOOP_END - LOOP_START))
-   SCRIPT_RUNTIME=$((SCRIPT_NOW - SCRIPT_START))
-
-   echo "Loop $loop_counter runtime: ${LOOP_RUNTIME}s | Total script runtime: ${SCRIPT_RUNTIME}s"
-   echo ""
-
    ((loop_counter++))
    sleep 1
 done
 """
-    cmd = f"touch {mount_path}/start_test.sh"
-    server.exec_command(cmd=cmd, sudo=True, long_running=True)
-    with server.remote_file(sudo=True, file_name=f"{mount_path}/start_test.sh", file_mode="w") as _f:
-        _f.write(test_file)
 
-    test_file = """#!/bin/bash
-
-# List of test directories
-DIRS=(
-   "/mnt/scale/exp1_mt1"
-   "/mnt/scale/exp1_mt2"
-   "/mnt/scale/exp1_mt3"
-)
-
+_RUN_ALL_SH = r"""#!/bin/bash
+# Usage: run_all_tests.sh <duration> <start_script> <read_bin> <write_bin> <dir1> [dir2 ...]
+DURATION=$1
+START_SH=$2
+READ_BIN=$3
+WRITE_BIN=$4
+shift 4
+DIRS=("$@")
 PIDS=()
 HOSTNAME=$(hostname)
+mkdir -p /tmp/nfs_custom_logs
 
-# Create logs directory if not exists
-mkdir -p logs
-
-# Cleanup on exit
 cleanup() {
-   echo ""
-   echo "Cleaning up all start_test.sh instances..."
-
    for pid in "${PIDS[@]}"; do
-       if kill -0 "$pid" 2>/dev/null; then
-           echo "Killing PID $pid"
-           kill -SIGTERM "$pid"
-       fi
+       kill -TERM "$pid" 2>/dev/null || true
    done
-
-   wait
-   echo "All test processes terminated."
+   wait 2>/dev/null || true
    exit 0
 }
-
 trap cleanup SIGINT SIGTERM
 
-# Start start_test.sh for each directory, with output redirected to logfile
 for dir in "${DIRS[@]}"; do
    dir_suffix=$(basename "$dir")
-   log_file="logs/${HOSTNAME}_start_test_${dir_suffix}.log"
-   echo "Starting test for directory: $dir (log: $log_file)"
-   ./start_test.sh "$dir" > "$log_file" 2>&1 &
+   log_file="/tmp/nfs_custom_logs/${HOSTNAME}_start_test_${dir_suffix}.log"
+   echo "Starting test for $dir (log: $log_file)"
+   bash "$START_SH" "$dir" "$READ_BIN" "$WRITE_BIN" > "$log_file" 2>&1 &
    PIDS+=($!)
    sleep 1
 done
 
-echo "All tests started. Will run for 1 hour (3600 seconds)."
-
-# Keep script running for 1 hour, then cleanup
-END_TIME=$(($(date +%s) + 356))
+END_TIME=$(($(date +%s) + DURATION))
 while [ $(date +%s) -lt $END_TIME ]; do
    sleep 1
 done
+echo "Duration elapsed. Cleaning up..."
+cleanup
+"""
 
-echo "1 hour elapsed. Cleaning up..."
-cleanup"""
-    cmd = f"touch {mount_path}/run_all_tests.sh"
-    server.exec_command(cmd=cmd, sudo=True, long_running=True)
-    with server.remote_file(sudo=True, file_name=f"{mount_path}/run_all_tests.sh", file_mode="w") as _f:
-        _f.write(test_file)
 
-    with server.remote_file(sudo=True, file_name=f"{mount_path}/run_all_tests.sh", file_mode="w") as _f:
-        _f.write(test_file)
-    out = server.exec_command(cmd=f"sh {mount_path}/run_all_tests.sh {mount_path}", sudo=True, long_running=True)
-    log.info(out)
-    return 0
+def run(ceph_cluster, **kw):
+    conf = merge_custom_config(kw.get("config"))
+    duration = int(conf.get("duration", 356))
+    gpfs = None
+
+    try:
+        gpfs = prepare_mount(ceph_cluster, conf)
+        client = gpfs["clients"][0]
+        mount_path = gpfs["nfs_mount"]
+
+        read_bin, write_bin = build_lock_binaries(client)
+        subdirs = [
+            f"{mount_path}/exp1_mt1",
+            f"{mount_path}/exp1_mt2",
+            f"{mount_path}/exp1_mt3",
+        ]
+        for d in subdirs:
+            client.exec_command(sudo=True, cmd=f"mkdir -p {shlex.quote(d)}")
+            client.exec_command(
+                sudo=True, cmd=f"echo seed > {shlex.quote(d)}/testfile.txt"
+            )
+
+        work = "/tmp/nfs_custom_locks"
+        start_sh = f"{work}/start_test.sh"
+        run_all = f"{work}/run_all_tests.sh"
+        write_remote(client, start_sh, _START_TEST_SH)
+        write_remote(client, run_all, _RUN_ALL_SH)
+        client.exec_command(sudo=True, cmd=f"chmod +x {start_sh} {run_all}")
+
+        dirs_arg = " ".join(shlex.quote(d) for d in subdirs)
+        cmd = (
+            f"bash {run_all} {duration} {start_sh} {read_bin} {write_bin} {dirs_arg}"
+        )
+        rc = client.exec_command(
+            sudo=True,
+            cmd=cmd,
+            long_running=True,
+            timeout=duration + 180,
+        )
+        log.info("crash/lock-kill scenarios finished (rc=%s)", rc)
+        return 0 if rc in (0, None) else 1
+    except Exception as exc:
+        log.error("crash_scenarios failed: %s", exc)
+        return 1
+    finally:
+        if gpfs:
+            cleanup_mount(gpfs["clients"], gpfs["nfs_mount"])

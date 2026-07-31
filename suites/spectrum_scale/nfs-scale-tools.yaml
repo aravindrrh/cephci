@@ -186,6 +186,66 @@ tests:
         port: "2049"
 
   - test:
+      name: NFS Upstream random CES node recycle
+      module: nfs_run_spectrum_scale_upstream_random_node_recycle.py
+      desc: Stop/start CES NFS and move CES addresses (discovered nodes)
+      abort-on-fail: false
+      timeout: 7200
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 356
+
+  - test:
+      name: NFS Upstream read with overlapping lock
+      module: nfs_run_spectrum_scale_upstream_read_with_overlapping_lock.py
+      desc: Multi-thread overlapping read locks on client mount
+      abort-on-fail: false
+      timeout: 3600
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 300
+
+  - test:
+      name: NFS Upstream write with overlapping lock
+      module: nfs_run_spectrum_scale_upstream_write_with_overlapping_lock.py
+      desc: Multi-thread overlapping write locks on client mount
+      abort-on-fail: false
+      timeout: 3600
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 300
+
+  - test:
+      name: NFS Upstream lock process kill scenarios
+      module: nfs_run_spectrum_scale_upstream_crash_scenarios.py
+      desc: Start/kill read+write lock stress under multiple mount subdirs
+      abort-on-fail: false
+      timeout: 7200
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 356
+
+  - test:
       name: Spectrum Scale NFS cleanup
       module: upstream_nfs_cleanup.py
       desc: Uninstall Ganesha RPMs, remove clones (Scale preserved by default)
