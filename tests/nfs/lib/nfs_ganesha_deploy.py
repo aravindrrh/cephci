@@ -221,7 +221,8 @@ def build_install_ganesha(ceph_cluster, config=None):
             "dnf -y install nfs-ganesha nfs-ganesha-gluster glusterfs-ganesha",
             timeout=timeout,
         )
-        _run(node, "systemctl start nfs-ganesha", timeout=timeout)
+        # enable: reboot persistence; start: bring service up now
+        _run(node, "systemctl enable --now nfs-ganesha", timeout=timeout)
         return {"ganesha_node": node, "mode": "yum", "yum_repo": yum_repo}
 
     # Source build path
@@ -335,8 +336,9 @@ def build_install_ganesha(ceph_cluster, config=None):
         check=False,
     )
     _run(node, "systemctl daemon-reload", timeout=60)
-    # ulimit in this shell does not affect the systemd unit; start the service only.
-    _run(node, "systemctl start nfs-ganesha", timeout=timeout)
+    # enable: unit starts after reboot; start (--now): bring service up for this run.
+    # ulimit in this shell does not affect the systemd unit.
+    _run(node, "systemctl enable --now nfs-ganesha", timeout=timeout)
 
     out, _ = node.exec_command(
         cmd="systemctl is-active nfs-ganesha", sudo=True, check_ec=False
@@ -449,7 +451,8 @@ def create_nfs_export(ceph_cluster, config=None):
 
     # Upstream RPM install overwrote stock ganesha.conf; restore Scale CES includes.
     _ensure_scale_ganesha_conf(node, timeout=120)
-    _run(node, "systemctl start nfs-ganesha", timeout=timeout)
+    # Re-enable in case export-stage restarts dropped the unit link; start service.
+    _run(node, "systemctl enable --now nfs-ganesha", timeout=timeout)
 
     out, _ = node.exec_command(
         cmd="systemctl is-active nfs-ganesha", sudo=True, check_ec=False

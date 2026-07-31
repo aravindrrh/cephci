@@ -1,121 +1,43 @@
+"""Overlapping NFSv4 read-lock stress on a client mount."""
+
+from tests.nfs.lib.spectrum_scale_custom_cases import (
+    build_lock_binaries,
+    cleanup_mount,
+    merge_custom_config,
+    prepare_mount,
+)
 from utility.log import Log
 
 log = Log(__name__)
 
 
 def run(ceph_cluster, **kw):
-    """Verify scale upstream with custom test scenarios
-    Args:
-        **kw: Key/value pairs of configuration information to be used in the test.
-    """
-    server = ceph_cluster.get_nodes("installer")[0]
-    client = ceph_cluster.get_nodes("client")[0]
+    conf = merge_custom_config(kw.get("config"))
+    duration = int(conf.get("duration", 300))
+    gpfs = None
 
+    try:
+        gpfs = prepare_mount(ceph_cluster, conf)
+        client = gpfs["clients"][0]
+        mount_path = gpfs["nfs_mount"]
 
-
-    mount_path = "/mnt/nfsv4"
-    EXPORT = "/ibm/scale_volume/export1"
-
-    # Test Scenario : 2
-    test_file = """#include <stdlib.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <stdio.h>
-#include <pthread.h>
-#include <string.h>
-
-#define NUM_THREADS 5
-#define MAX_PATH_LEN 1024
-
-char filepath[MAX_PATH_LEN];
-
-void *thread_function(void *arg) {
-   int rfd;
-   struct flock rfl;
-   long thread_id = (long)arg;
-   int toggle = 0;
-
-   while (1) {
-       // Open the file in read-only mode
-       rfd = open(filepath, O_RDONLY);
-       if (rfd == -1) {
-           printf("Thread %ld: Failed to open file %s\n", thread_id, filepath);
-           continue;
-       }
-
-       printf("Thread %ld: Open success: %s\n", thread_id, filepath);
-
-       // Alternate lock region between 0 and 5
-       rfl.l_type = F_RDLCK;
-       rfl.l_whence = SEEK_SET;
-       rfl.l_start = toggle ? 5 : 0;
-       rfl.l_len = 0;
-
-       printf("Thread %ld: Trying to acquire read lock at offset %lld...\n",
-              thread_id, (long long)rfl.l_start);
-
-       if (fcntl(rfd, F_SETLKW, &rfl) == -1) {
-           printf("Thread %ld: Failed to set F_RDLCK\n", thread_id);
-           close(rfd);
-           continue;
-       } else {
-           printf("Thread %ld: F_RDLCK granted at offset %lld\n",
-                  thread_id, (long long)rfl.l_start);
-       }
-
-       // Unlock the file
-       rfl.l_type = F_UNLCK;
-       if (fcntl(rfd, F_SETLKW, &rfl) == -1) {
-           printf("Thread %ld: Failed to unlock the file\n", thread_id);
-       } else {
-           printf("Thread %ld: File unlocked at offset %lld\n",
-                  thread_id, (long long)rfl.l_start);
-       }
-
-       close(rfd);
-       toggle = !toggle; // Alternate the region
-   }
-
-   pthread_exit(NULL);
-}
-
-int main(int argc, char *argv[]) {
-   if (argc != 2) {
-       fprintf(stderr, "Usage: %s <directory>\n", argv[0]);
-       exit(EXIT_FAILURE);
-   }
-
-   snprintf(filepath, MAX_PATH_LEN, "%s/testfile.txt", argv[1]);
-
-   pthread_t threads[NUM_THREADS];
-   int rc;
-   long t;
-
-   for (t = 0; t < NUM_THREADS; t++) {
-       printf("Creating thread %ld\n", t);
-       rc = pthread_create(&threads[t], NULL, thread_function, (void *)t);
-       if (rc) {
-           printf("ERROR: return code from pthread_create() is %d\n", rc);
-           exit(EXIT_FAILURE);
-       }
-   }
-
-   // Wait for all threads to complete
-   for (t = 0; t < NUM_THREADS; t++) {
-       pthread_join(threads[t], NULL);
-   }
-
-   pthread_exit(NULL);
-}
-"""
-    cmd = f"touch {mount_path}/read_lookc_thr.c"
-    server.exec_command(cmd=cmd, sudo=True, long_running=True)
-    with server.remote_file(sudo=True, file_name=f"{mount_path}/read_lookc_thr.c", file_mode="w") as _f:
-        _f.write(test_file)
-    out = server.exec_command(cmd=f"gcc {mount_path}/read_lookc_thr.c", sudo=True, long_running=True)
-    log.info(out)
-    out = server.exec_command(cmd=f"./a.out {mount_path}", sudo=True, long_running=True)
-    log.info(out)
-
-    return 0
+        read_bin, _ = build_lock_binaries(client)
+        # Seed file for readers
+        client.exec_command(
+            sudo=True,
+            cmd=f"echo lockseed > {mount_path}/testfile.txt",
+        )
+        rc = client.exec_command(
+            sudo=True,
+            cmd=f"{read_bin} {mount_path} {duration}",
+            long_running=True,
+            timeout=duration + 120,
+        )
+        log.info("read overlapping lock finished (rc=%s)", rc)
+        return 0 if rc in (0, None) else 1
+    except Exception as exc:
+        log.error("read_with_overlapping_lock failed: %s", exc)
+        return 1
+    finally:
+        if gpfs:
+            cleanup_mount(gpfs["clients"], gpfs["nfs_mount"])

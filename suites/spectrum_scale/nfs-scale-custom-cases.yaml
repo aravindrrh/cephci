@@ -1,54 +1,101 @@
 #===============================================================================================
-#-------------------------------------
-#---    Test Suite for Nfs Ganesha vers 4.2---
-#-------------------------------------
-# Conf: conf/squid/nfs/1admin-7node-3client.yaml
-# Smoke test cases for
-#    - Bootstrap
-#    - Host management
-#    - Configure nfs-ganesha on nfs server,do mount on any client and do IOs
-#    - Test tier1 scenarios
+# Custom upstream NFS-Ganesha / Spectrum Scale stress cases (Onecloud).
 #
+# First test deploys Scale + Ganesha (Python path). Remaining tests set
+# skip_deployment: true and mount clients themselves.
+#
+# Conf: conf/spectrum_scale/spectrum_scale_onecloud_5node_2client.yaml
+#
+# Optional config:
+#   duration: wall-clock seconds for stress loops (default 300)
+#   ces_nodes: explicit CES hostnames for node-recycle (else mmlscluster --ces)
 #===============================================================================================
 tests:
 
-  - test:
-      name: Setup Upstream NFS and Ceph
-      module: nfs_run_spectrum_scale_upstream.py
-      abort-on-fail: true
+#   - test:
+#       name: Setup Upstream NFS and Spectrum Scale
+#       module: nfs_run_spectrum_scale_upstream.py
+#       desc: Deploy Scale + NFS-Ganesha (export1) for custom cases
+#       abort-on-fail: true
+#       timeout: 14400
+#       config:
+#         nfs_version: "4.1"
+#         clients: 1
+#         mount_point: /mnt/nfsv4
+#         nfs_export: /ibm/scale_volume/export1
+#         port: "2049"
 
   - test:
-      name: NFS Upstream Ganesha Spectrum Scale run with file ops in loop
+      name: NFS Upstream file ops in loop
       module: nfs_run_spectrum_scale_upstream_file_ops_in_loop.py
-      desc:  NFS Upstream Ganesha Spectrum Scale run with file ops in loop
+      desc: Create/list/delete loop on client NFS mount
       abort-on-fail: false
+      timeout: 3600
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 300
 
   - test:
-      name: NFS Upstream Ganesha Spectrum Scale run with node recycle
+      name: NFS Upstream random CES node recycle
       module: nfs_run_spectrum_scale_upstream_random_node_recycle.py
-      desc:  NFS Upstream Ganesha Spectrum Scale run with node recycle
+      desc: Stop/start CES NFS and move CES addresses (discovered nodes)
       abort-on-fail: false
+      timeout: 7200
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 356
 
   - test:
-      name: NFS Upstream Ganesha Spectrum Scale run with read and overlapping lock
+      name: NFS Upstream read with overlapping lock
       module: nfs_run_spectrum_scale_upstream_read_with_overlapping_lock.py
-      desc:  NFS Upstream Ganesha Spectrum Scale run with read and overlapping lock
+      desc: Multi-thread overlapping read locks on client mount
       abort-on-fail: false
+      timeout: 3600
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 300
 
   - test:
-      name: NFS Upstream Ganesha Spectrum Scale run with write and overlapping lock
+      name: NFS Upstream write with overlapping lock
       module: nfs_run_spectrum_scale_upstream_write_with_overlapping_lock.py
-      desc:  NFS Upstream Ganesha Spectrum Scale run with write and overlapping lock
+      desc: Multi-thread overlapping write locks on client mount
       abort-on-fail: false
+      timeout: 3600
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 300
 
   - test:
-      name: NFS Upstream Ganesha Spectrum Scale run with write and overlapping lock
-      module: nfs_run_spectrum_scale_upstream_write_with_overlapping_lock.py
-      desc:  NFS Upstream Ganesha Spectrum Scale run with write and overlapping lock
-      abort-on-fail: false
-
-  - test:
-      name: NFS Upstream Ganesha Spectrum Scale run all scenarios
+      name: NFS Upstream lock process kill scenarios
       module: nfs_run_spectrum_scale_upstream_crash_scenarios.py
-      desc:  NFS Upstream Ganesha Spectrum Scale run all scenarios
+      desc: Start/kill read+write lock stress under multiple mount subdirs
       abort-on-fail: false
+      timeout: 7200
+      config:
+        skip_deployment: true
+        nfs_version: "4.1"
+        clients: 1
+        mount_point: /mnt/nfsv4
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        duration: 356
