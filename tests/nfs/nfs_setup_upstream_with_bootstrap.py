@@ -80,14 +80,14 @@ def run(ceph_cluster, **kw):
     for node in clients:
         node.exec_command(cmd="yum install -y nfs-utils wget", sudo=True)
 
-    # Setup Passwordless SSH
+    # Setup Passwordless SSH using root_password from conf YAML (node.root_passwd)
     for node in ceph_cluster.get_nodes(""):
         if node != installer:
-
-            # cmd = "{} {}".format(SSHPASS.format(node.root_passwd),
-            #                      SSH_COPYID.format(SSH_ID_RSA_PUB, "root", node.ip_address)
-            #                      )
-            cmd = f"sshpass -p passwd ssh-copy-id -o StrictHostKeyChecking=no -f -i ~/.ssh/id_rsa.pub root@{node.ip_address}"
+            cmd = "{} ssh-copy-id -o StrictHostKeyChecking=no -f -i {} root@{}".format(
+                SSHPASS.format(node.root_passwd),
+                SSH_ID_RSA_PUB,
+                node.ip_address,
+            )
             print(cmd)
             installer.exec_command(cmd=cmd, sudo=True, verbose=True)
 
