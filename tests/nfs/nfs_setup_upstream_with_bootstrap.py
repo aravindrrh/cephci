@@ -36,7 +36,7 @@ def run(ceph_cluster, **kw):
     )
 
     # Install required packages
-    cmds = ['dnf -y install centos-release-ceph epel-release',
+    cmds = ['dnf -y install centos-release-ceph-tentacle epel-release',
             'dnf install dnf-plugins-core -y',
             'dnf config-manager --set-enabled crb',
             'yum install -y sshpass git bison cmake dbus-devel flex gcc-c++ krb5-devel libacl-devel libblkid-devel '
