@@ -1,10 +1,16 @@
 from time import sleep
 
 from upstream_nfs_edit_export_config_with_ro import update_export_conf
-from upstream_nfs_operations import cleanup_cluster, create_export, setup_nfs_cluster
+from upstream_nfs_operations import (
+    cleanup_cluster,
+    cleanup_export_mount,
+    create_export,
+    delete_export,
+    setup_nfs_cluster,
+)
 
-from cli.exceptions import ConfigError, OperationFailedError
-from cli.utilities.filesys import Mount, Unmount
+from cli.exceptions import ConfigError
+from cli.utilities.filesys import Mount
 from utility.log import Log
 
 log = Log(__name__)
@@ -109,13 +115,12 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        log.info("Unmounting nfs-ganesha readonly mount on client:")
-        if Unmount(clients[0]).unmount(nfs_readonly_mount):
-            raise OperationFailedError(
-                f"Failed to unmount nfs on {clients[0].hostname}"
-            )
-        log.info("Removing nfs-ganesha readonly mount dir on client:")
-        clients[0].exec_command(sudo=True, cmd=f"rm -rf  {nfs_readonly_mount}")
-        cleanup_cluster(clients[0], nfs_mount, nfs_name, nfs_export)
+        # Extra RO export/mount — remove only what this test created
+        try:
+            cleanup_export_mount(clients[0], nfs_readonly_mount)
+            delete_export(installer, nfs_export_readonly)
+            cleanup_cluster(clients[0], nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("readonly cleanup failed: %s", exc)
         log.info("Cleaning up successfull")
     return 0

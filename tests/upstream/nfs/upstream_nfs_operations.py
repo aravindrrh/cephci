@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from threading import Thread
 from time import sleep
@@ -83,9 +84,13 @@ EXPORT {
             installer_node.exec_command(sudo=True, cmd=cmd)
             log.info("Subvolume group created successfully")
 
-        # Step 2: Create subvolume
-        cmd = f"ceph fs subvolume create cephfs {subvol_name} --group_name ganeshagroup --namespace-isolated"
-        installer_node.exec_command(sudo=True, cmd=cmd)
+        # Step 2: Create subvolume (idempotent — keep static exports across chained tests)
+        # Note: SSH exec_command is not a shell, so do not use `|| true` here.
+        cmd = (
+            f"ceph fs subvolume create cephfs {subvol_name} "
+            f"--group_name ganeshagroup --namespace-isolated"
+        )
+        installer_node.exec_command(sudo=True, cmd=cmd, check_ec=False)
 
         # Get volume path
         cmd = (
@@ -261,20 +266,195 @@ def create_export(installer_node, nfs_export, squash="None"):
         raise OperationFailedError("Failed to restart nfs service")
 
 
+def _remove_export_block(conf_text, nfs_export):
+    """Drop the EXPORT { ... } block whose Pseudo matches nfs_export.
+
+    Leaves all other exports untouched. Handles nested braces (FSAL / CLIENT).
+    Matches only a real EXPORT block — not EXPORT_DEFAULTS.
+    """
+    if isinstance(conf_text, bytes):
+        conf_text = conf_text.decode("utf-8", errors="replace")
+
+    lines = conf_text.splitlines(keepends=True)
+    out = []
+    i = 0
+    # Exact EXPORT { opener — must not match EXPORT_DEFAULTS {
+    export_start = re.compile(r"^\s*EXPORT\s*\{")
+    while i < len(lines):
+        if export_start.match(lines[i]):
+            block = [lines[i]]
+            depth = lines[i].count("{") - lines[i].count("}")
+            i += 1
+            while i < len(lines) and depth > 0:
+                block.append(lines[i])
+                depth += lines[i].count("{") - lines[i].count("}")
+                i += 1
+            block_text = "".join(block)
+            # Match Pseudo = "/exportRO" (with optional spaces / quotes)
+            if (
+                f'Pseudo = "{nfs_export}"' in block_text
+                or f"Pseudo = '{nfs_export}'" in block_text
+                or f'Pseudo="{nfs_export}"' in block_text
+            ):
+                log.info(
+                    "Removing EXPORT block for Pseudo %s from ganesha.conf", nfs_export
+                )
+                continue
+            out.extend(block)
+        else:
+            out.append(lines[i])
+            i += 1
+    return "".join(out)
+
+
+def delete_export(installer_node, nfs_export):
+    """Remove one extra export created by create_export / Ceph.nfs.export.create(installer=...).
+
+    Why: upstream Ganesha is conf-file based — `ceph nfs export delete` is a no-op here.
+    This strips only the matching EXPORT block, restarts ganesha, and removes the
+    CephFS subvolume. Static /export_N exports are left alone.
+    """
+    subvol_name = nfs_export.replace("/", "")
+    ganesha_conf_file = "/etc/ganesha/ganesha.conf"
+
+    # Stop ganesha before rewriting conf
+    try:
+        installer_node.exec_command(sudo=True, cmd="pkill -9 ganesha", check_ec=False)
+    except Exception as exc:
+        log.warning("Could not stop ganesha before delete_export: %s", exc)
+
+    try:
+        out = installer_node.exec_command(
+            sudo=True, cmd=f"cat {ganesha_conf_file}", check_ec=False
+        )
+        conf_text = out[0] if out else ""
+        new_conf = _remove_export_block(conf_text or "", nfs_export)
+        with installer_node.remote_file(
+            sudo=True, file_name=ganesha_conf_file, file_mode="w"
+        ) as _f:
+            _f.write(new_conf)
+            _f.flush()
+    except Exception as exc:
+        log.warning("Failed to strip EXPORT %s from ganesha.conf: %s", nfs_export, exc)
+
+    # Bring ganesha back with the updated conf
+    try:
+        installer_node.exec_command(
+            sudo=True,
+            cmd=(
+                "nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf "
+                "-L /var/log/ganesha.log"
+            ),
+            check_ec=False,
+        )
+        sleep(5)
+    except Exception as exc:
+        log.warning("Failed to restart ganesha after delete_export: %s", exc)
+
+    # Drop the CephFS subvolume created alongside the export
+    try:
+        installer_node.exec_command(
+            sudo=True,
+            cmd=(
+                f"ceph fs subvolume rm cephfs {subvol_name} "
+                f"--group_name ganeshagroup --force"
+            ),
+            check_ec=False,
+        )
+        log.info("Removed CephFS subvolume %s (group ganeshagroup)", subvol_name)
+    except Exception as exc:
+        log.warning("Failed to remove subvolume %s: %s", subvol_name, exc)
+
+
+def cleanup_export_mount(clients, mount_path):
+    """Wipe files under an extra mount, unmount it, and remove the mount dir."""
+    if not isinstance(clients, list):
+        clients = [clients]
+    for client in clients:
+        try:
+            client.exec_command(
+                sudo=True,
+                cmd=f"find {mount_path} -mindepth 1 -delete",
+                check_ec=False,
+                long_running=True,
+            )
+        except Exception as exc:
+            log.warning("Failed wiping %s on %s: %s", mount_path, client.hostname, exc)
+        # Prefer lazy umount; ignore failures so cleanup always proceeds
+        try:
+            Unmount(client).unmount(mount_path)
+        except Exception:
+            try:
+                client.exec_command(
+                    sudo=True, cmd=f"umount -l {mount_path}", check_ec=False
+                )
+            except Exception as exc:
+                log.warning(
+                    "Failed unmounting %s on %s: %s", mount_path, client.hostname, exc
+                )
+        try:
+            client.exec_command(sudo=True, cmd=f"rm -rf {mount_path}", check_ec=False)
+        except Exception as exc:
+            log.warning(
+                "Failed removing mount dir %s on %s: %s",
+                mount_path,
+                client.hostname,
+                exc,
+            )
+
+
+def wipe_export_contents(client, server_ip, export_pseudo, version="4.2", port="2049"):
+    """Mount an export briefly, delete files inside it, then unmount.
+
+    Used when a workload wrote into a static export (e.g. /export_1 via pynfs)
+    that must stay defined for the next test.
+    """
+    tmp_mount = f"/mnt/nfs_wipe_{export_pseudo.strip('/').replace('/', '_')}"
+    try:
+        client.exec_command(sudo=True, cmd=f"mkdir -p {tmp_mount}", check_ec=False)
+        client.exec_command(
+            sudo=True,
+            cmd=(
+                f"mount -t nfs -o vers={version},port={port} "
+                f"{server_ip}:{export_pseudo} {tmp_mount}"
+            ),
+            check_ec=False,
+        )
+        client.exec_command(
+            sudo=True,
+            cmd=f"find {tmp_mount} -mindepth 1 -delete",
+            check_ec=False,
+            long_running=True,
+        )
+    except Exception as exc:
+        log.warning("wipe_export_contents failed for %s: %s", export_pseudo, exc)
+    finally:
+        try:
+            client.exec_command(
+                sudo=True,
+                cmd=f"umount -l {tmp_mount}; rm -rf {tmp_mount}",
+                check_ec=False,
+            )
+        except Exception:
+            pass
+
+
 def cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export):
     """
-    Clean up the cluster post nfs operation
+    Clean up client-side mount artefacts after an nfs operation.
+
     Steps:
         1. rm -rf of the content inside the mount folder --> rm -rf /mnt/nfs/*
         2. Unmount the volume
         3. rm -rf of the mount point
-        4. delete export
-        5. delete cluster
+
+    Does NOT delete static Ganesha exports or the nfs "cluster". Extra exports
+    created by a test must be removed via delete_export() in that test's finally.
     Args:
         clients (ceph): Client nodes
         nfs_mount (str): nfs mount path
-        nfs_name (str): nfs cluster name
-        nfs_export (str): nfs export path
+        nfs_name (str): nfs cluster name (unused; kept for call-site compat)
+        nfs_export (str): nfs export path (unused; kept for call-site compat)
     """
     if not isinstance(clients, list):
         clients = [clients]

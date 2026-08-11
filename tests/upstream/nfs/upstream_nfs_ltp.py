@@ -62,24 +62,26 @@ def run(ceph_cluster, **kw):
         log.error(f"Error : {e}")
         return 1
     finally:
-        # sleep(30)
-        # view test results
-        log.info("===================RUN_RESULTS====================")
-        cmd = "cat /tmp/ltp_output.log"
-        out = clients[0].exec_command(cmd=cmd, sudo=True)
-        log.info(out)
+        # view test results (best-effort — must not block mount cleanup)
+        try:
+            log.info("===================RUN_RESULTS====================")
+            out = clients[0].exec_command(
+                cmd="cat /tmp/ltp_output.log", sudo=True, check_ec=False
+            )
+            log.info(out)
 
-        log.info("===================RUN_LOG====================")
-        cmd = "cat /tmp/ltp_run.log"
-        out = clients[0].exec_command(cmd=cmd, sudo=True)
-        log.info(out)
+            log.info("===================RUN_LOG====================")
+            out = clients[0].exec_command(
+                cmd="cat /tmp/ltp_run.log", sudo=True, check_ec=False
+            )
+            log.info(out)
+        except Exception as exc:
+            log.warning("ltp log collection failed: %s", exc)
 
-        # Find failed tests
-        # cmd = "grep FAIL /tmp/ltp_output.log"
-        # out = clients[0].exec_command(cmd=cmd, sudo=True)
-        # log.info(out)
-
-        log.info("Cleaning up skipped")
-        # cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-        # log.info("Cleaning up successfull")
+        log.info("Cleaning up mount contents for next test")
+        try:
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+            log.info("Cleaning up successful")
+        except Exception as exc:
+            log.warning("ltp cleanup_cluster failed: %s", exc)
     return 0

@@ -3,15 +3,16 @@ from time import sleep
 
 from upstream_nfs_operations import (
     cleanup_cluster,
+    cleanup_export_mount,
+    create_export,
+    delete_export,
     enable_v3_locking,
     setup_nfs_cluster,
-    create_export,
     analyze_ganesha_cores,
 )
 
-from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
-from cli.utilities.filesys import Mount, Unmount
+from cli.utilities.filesys import Mount
 from utility.log import Log
 
 log = Log(__name__)
@@ -77,74 +78,68 @@ def run(ceph_cluster, **kw):
 
     # Create export for locking test
     create_export(installer, nfs_lock_export)
-    # Ceph(clients[0]).nfs.export.create(
-    #     fs_name=fs_name,
-    #     nfs_name=nfs_name,
-    #     nfs_export=nfs_lock_export,
-    #     fs=fs_name,
-    # )
-
-    # Mount the export on 2 clients in parallel
-    for client in clients[:2]:
-        client.create_dirs(dir_path=nfs_lock_mount, sudo=True)
-        if Mount(client).nfs(
-            mount=nfs_lock_mount,
-            version=version,
-            port=port,
-            server=installer.ip_address,
-            export=nfs_lock_export,
-            other_opts="local_lock=posix",
-        ):
-            raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
-    log.info("Mount succeeded on client")
-
-    # Check the mount protocol
-    if version == 3:
-        enable_v3_locking(installer)
-
-    # Create a file on Client 1
-    file_path = f"{nfs_lock_mount}/sample_file"
-    clients[0].exec_command(cmd=f"touch {file_path}", sudo=True)
-
-    # Perform File Lock from client 1
-    c1 = Thread(target=get_file_lock, args=(clients[0],))
-    c1.start()
-
-    # Adding a constant sleep as its required for the thread call to start the lock process
-    sleep(5)
+    rc = 1
     try:
-        get_file_lock(clients[1])
-        log.error(
-            "Unexpected: Client 2 was able to access file lock while client 1 lock was active"
-        )
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-        return 1
-    except Exception as e:
-        log.info(
-            f"Expected: Failed to acquire lock from client 2 while client 1 lock is in on {e}"
-        )
+        # Mount the export on 2 clients in parallel
+        for client in clients[:2]:
+            client.create_dirs(dir_path=nfs_lock_mount, sudo=True)
+            if Mount(client).nfs(
+                mount=nfs_lock_mount,
+                version=version,
+                port=port,
+                server=installer.ip_address,
+                export=nfs_lock_export,
+                other_opts="local_lock=posix",
+            ):
+                raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
+        log.info("Mount succeeded on client")
 
-    c1.join()
+        # Check the mount protocol
+        if version == 3:
+            enable_v3_locking(installer)
 
-    try:
-        get_file_lock(clients[1])
-        log.info(
-            "Expected: Successfully acquired lock from client 2 while client 1 lock is released"
-        )
-    except Exception as e:
-        log.error(
-            f"Unexpected: Failed to acquire lock from client 2 while client 1 lock is in removed {e}"
-        )
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-        return 1
+        # Create a file on Client 1
+        file_path = f"{nfs_lock_mount}/sample_file"
+        clients[0].exec_command(cmd=f"touch {file_path}", sudo=True)
 
-    # Cleaning up the locking mount point
-    log.info("Unmounting nfs-ganesha lock mount on client:")
-    for client in clients[:2]:
-        if Unmount(client).unmount(nfs_lock_mount):
-            raise OperationFailedError(f"Failed to unmount nfs on {client.hostname}")
-        log.info("Removing nfs-ganesha lock mount dir on client:")
-        client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_lock_mount}")
-    cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-    analyze_ganesha_cores(nfs_node)
-    return 0
+        # Perform File Lock from client 1
+        c1 = Thread(target=get_file_lock, args=(clients[0],))
+        c1.start()
+
+        # Adding a constant sleep as its required for the thread call to start the lock process
+        sleep(5)
+        rc = 0
+        try:
+            get_file_lock(clients[1])
+            log.error(
+                "Unexpected: Client 2 was able to access file lock while client 1 lock was active"
+            )
+            rc = 1
+        except Exception as e:
+            log.info(
+                f"Expected: Failed to acquire lock from client 2 while client 1 lock is in on {e}"
+            )
+
+        c1.join()
+
+        if rc == 0:
+            try:
+                get_file_lock(clients[1])
+                log.info(
+                    "Expected: Successfully acquired lock from client 2 while client 1 lock is released"
+                )
+            except Exception as e:
+                log.error(
+                    f"Unexpected: Failed to acquire lock from client 2 while client 1 lock is in removed {e}"
+                )
+                rc = 1
+    finally:
+        # Extra lock export/mount — remove only what this test created
+        try:
+            cleanup_export_mount(clients[:2], nfs_lock_mount)
+            delete_export(installer, nfs_lock_export)
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+            analyze_ganesha_cores(nfs_node)
+        except Exception as exc:
+            log.warning("file_lock cleanup failed: %s", exc)
+    return rc

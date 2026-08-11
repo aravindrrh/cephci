@@ -1,11 +1,16 @@
 from threading import Thread
 from time import sleep
 
-from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster
+from upstream_nfs_operations import (
+    cleanup_cluster,
+    cleanup_export_mount,
+    delete_export,
+    setup_nfs_cluster,
+)
 
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
-from cli.utilities.filesys import Mount, Unmount
+from cli.utilities.filesys import Mount
 from utility.log import Log
 
 log = Log(__name__)
@@ -186,14 +191,11 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         sleep(10)
-        # Cleaning up the squash export and mount dir
-        for client in clients[:2]:
-            log.info("Unmounting nfs-ganesha squash mount on client:")
-            if Unmount(client).unmount(nfs_squash_mount):
-                raise OperationFailedError(
-                    f"Failed to unmount nfs on {clients[0].hostname}"
-                )
-            log.info("Removing nfs-ganesha squash mount dir on client:")
-            client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_squash_mount}")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        # Extra squash export/mount — remove only what this test created
+        try:
+            cleanup_export_mount(clients[:2], nfs_squash_mount)
+            delete_export(installer, nfs_export_squash)
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("setuid_bit cleanup failed: %s", exc)
     return 0

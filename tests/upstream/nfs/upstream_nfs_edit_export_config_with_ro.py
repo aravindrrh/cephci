@@ -1,10 +1,9 @@
 from time import sleep
 
-from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster, create_export
+from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster, create_export, cleanup_export_mount, delete_export
 
-from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
-from cli.utilities.filesys import Mount, Unmount
+from cli.utilities.filesys import Mount
 from utility.log import Log
 
 log = Log(__name__)
@@ -171,15 +170,12 @@ def run(ceph_cluster, **kw):
     finally:
         log.info("Cleaning up")
         sleep(30)
-        # Clearning up the read only export and mount dir
-        if Unmount(clients[0]).unmount(nfs_readonly_mount):
-            raise OperationFailedError(
-                f"Failed to unmount nfs on {clients[0].hostname}"
-            )
-        clients[0].exec_command(sudo=True, cmd=f"rm -rf  {nfs_readonly_mount}")
-        # Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_readonly)
-
-        # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        # Extra RO export/mount — remove only what this test created
+        try:
+            cleanup_export_mount(clients[0], nfs_readonly_mount)
+            delete_export(installer, nfs_export_readonly)
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("edit_export_ro cleanup failed: %s", exc)
         log.info("Cleaning up successfull")
     return 0

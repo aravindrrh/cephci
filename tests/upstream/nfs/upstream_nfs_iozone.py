@@ -94,6 +94,8 @@ def run(ceph_cluster, **kw):
         log.error(f"Error : {e}")
         return 1
     finally:
-        # sleep(30)
-        pass
+        try:
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("iozone cleanup_cluster failed: %s", exc)
     return 0

@@ -1,4 +1,4 @@
-from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster
+from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster, wipe_export_contents
 
 from utility.log import Log
 
@@ -34,10 +34,11 @@ def run(ceph_cluster, **kw):
             ceph_cluster=ceph_cluster,
         )
         # Perform mount on client
-        cmds = ["dnf -y install git wget gcc nfs-utils time make",
-                "mkdir -p /mnt/nfsv4",
-                f"mount -t nfs -o vers=4 {nfs_node.ip_address}:export_1 /mnt/nfsv4"
-                ]
+        cmds = [
+            "dnf -y install git wget gcc nfs-utils time make",
+            "mkdir -p /mnt/nfsv4",
+            f"mount -t nfs -o vers=4 {nfs_node.ip_address}:/export_1 /mnt/nfsv4",
+        ]
 
         for cmd in cmds:
             clients[0].exec_command(cmd=cmd, sudo=True)
@@ -48,8 +49,6 @@ def run(ceph_cluster, **kw):
         nfstest_repo = "git://git.linux-nfs.org/projects/mora/nfstest.git"
         nfstest_dir = "/root/nfstest"
         nfstest_lock = f"{nfstest_dir}/test/nfstest_lock"
-        export = config.get("nfs_export", "/ibm/scale_volume")
-        version = config.get("nfs_version", 3)
 
         try:
             log.info(">>> Installing required packages...")
@@ -62,7 +61,8 @@ def run(ceph_cluster, **kw):
             log.info(">>> Enabling and configuring firewalld...")
             client.exec_command(cmd="systemctl enable firewalld --now", sudo=True)
             client.exec_command(
-                cmd="firewall-cmd --zone=public --add-port=9900-9920/tcp --permanent", sudo=True
+                cmd="firewall-cmd --zone=public --add-port=9900-9920/tcp --permanent",
+                sudo=True,
             )
             client.exec_command(cmd="firewall-cmd --reload", sudo=True)
             client.exec_command(cmd="firewall-cmd --zone=public --list-ports", sudo=True)
@@ -73,18 +73,21 @@ def run(ceph_cluster, **kw):
             log.info(">>> Configuring PYTHONPATH...")
             bashrc_path = "~/.bashrc"
             export_line = f"export PYTHONPATH={nfstest_dir}"
-            grep_cmd = f"grep -qxF '{export_line}' {bashrc_path} || echo '{export_line}' >> {bashrc_path}"
+            grep_cmd = (
+                f"grep -qxF '{export_line}' {bashrc_path} || "
+                f"echo '{export_line}' >> {bashrc_path}"
+            )
             client.exec_command(cmd=grep_cmd, sudo=True)
             client.exec_command(cmd=f"export PYTHONPATH={nfstest_dir}", sudo=True)
 
             log.info(">>> Verifying nfstest_lock exists...")
             client.exec_command(cmd=f"ls {nfstest_lock}", sudo=True)
 
-            for version in ['4', '4.1']:
-                log.info(f">>> Running  nfstest_lock sanity test for V{version}")
+            for nfs_ver in ["4", "4.1"]:
+                log.info(f">>> Running  nfstest_lock sanity test for V{nfs_ver}")
                 test_cmd = (
-                    f"{nfstest_lock} --server {nfs_node .ip_address} --export export_1 "
-                    f"--nfsversion {version} --createlog"
+                    f"{nfstest_lock} --server {nfs_node.ip_address} --export /export_1 "
+                    f"--nfsversion {nfs_ver} --createlog"
                 )
                 out, err = client.exec_command(cmd=test_cmd, sudo=True, timeout=7200)
                 log.info(out)
@@ -99,5 +102,23 @@ def run(ceph_cluster, **kw):
         log.error(f"Error : {e}")
         return 1
     finally:
-        # sleep(30)
-        pass
+        # Extra /mnt/nfsv4 mounts used by nfstest_lock
+        for client in clients[:2]:
+            try:
+                client.exec_command(
+                    sudo=True,
+                    cmd="umount -l /mnt/nfsv4",
+                    check_ec=False,
+                )
+                client.exec_command(
+                    sudo=True, cmd="rm -rf /mnt/nfsv4", check_ec=False
+                )
+            except Exception as exc:
+                log.warning("locktest extra-mount cleanup failed: %s", exc)
+        wipe_export_contents(
+            clients[0], nfs_node.ip_address, "/export_1", version="4.1", port=port
+        )
+        try:
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("locktest cleanup_cluster failed: %s", exc)

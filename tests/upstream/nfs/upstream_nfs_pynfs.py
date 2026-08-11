@@ -1,4 +1,4 @@
-from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster
+from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster, wipe_export_contents
 
 from utility.log import Log
 
@@ -61,6 +61,12 @@ def run(ceph_cluster, **kw):
         log.error(f"Error : {e}")
         return 1
     finally:
-        # sleep(30)
-        pass
+        # pynfs --maketree fills /export_1; wipe files, keep the export
+        wipe_export_contents(
+            clients[0], nfs_node.ip_address, f"{nfs_export}_1", version="4.1", port=port
+        )
+        try:
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("pynfs cleanup_cluster failed: %s", exc)
     return 0

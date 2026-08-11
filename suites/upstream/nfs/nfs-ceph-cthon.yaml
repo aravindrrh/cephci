@@ -13,6 +13,16 @@
 tests:
 
   - test:
+      name: Pre-clean Upstream NFS and Ceph artefacts
+      module: nfs_cleanup_upstream_ceph.py
+      desc: Wipe leftover cephadm/dnf artefacts and OSD disks before setup
+      abort-on-fail: false
+      config:
+        wipe_disks: true
+        remove_packages: true
+        remove_ganesha: true
+
+  - test:
       name: Setup Upstream NFS and Ceph
       module: nfs_setup_upstream_with_bootstrap.py
       abort-on-fail: true
@@ -97,3 +107,13 @@ tests:
       config:
         nfs_version: 4.2
         clients: 1
+
+  - test:
+      name: Cleanup Upstream NFS and Ceph
+      module: nfs_cleanup_upstream_ceph.py
+      desc: Remove cephadm/dnf Ceph artefacts and wipe OSD disks for a clean re-run
+      abort-on-fail: false
+      config:
+        wipe_disks: true
+        remove_packages: true
+        remove_ganesha: true

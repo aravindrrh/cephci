@@ -76,8 +76,10 @@ def run(ceph_cluster, **kw):
         log.error(f"Error : {e}")
         return 1
     finally:
-        # sleep(30)
-        log.info("Cleaning up skipped")
-        # cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-        # log.info("Cleaning up successfull")
+        log.info("Cleaning up mount contents for next test")
+        try:
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+            log.info("Cleaning up successful")
+        except Exception as exc:
+            log.warning("spec_storage cleanup_cluster failed: %s", exc)
     return 0

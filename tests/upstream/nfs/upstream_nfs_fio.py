@@ -6,7 +6,7 @@ Uses the same cluster setup semantics as upstream_nfs_cthon.py / upstream_nfs_lt
 """
 
 from cli.exceptions import OperationFailedError
-from upstream_nfs_operations import setup_nfs_cluster
+from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster
 
 from utility.log import Log
 
@@ -140,6 +140,20 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         for m in reversed(mounts_to_clean):
+            try:
+                client0.exec_command(
+                    sudo=True, cmd=f"rm -rf {m}/*", check_ec=False, long_running=True
+                )
+            except Exception:
+                pass
             _umount_lazy(client0, m)
+            try:
+                client0.exec_command(sudo=True, cmd=f"rm -rf {m}", check_ec=False)
+            except Exception:
+                pass
+        try:
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("fio cleanup_cluster failed: %s", exc)
 
     return 0

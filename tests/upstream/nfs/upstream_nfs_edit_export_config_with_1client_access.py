@@ -1,10 +1,15 @@
 from time import sleep
 
-from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster
+from upstream_nfs_operations import (
+    cleanup_cluster,
+    cleanup_export_mount,
+    delete_export,
+    setup_nfs_cluster,
+)
 
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
-from cli.utilities.filesys import Mount, Unmount
+from cli.utilities.filesys import Mount
 from cli.utilities.windows_utils import setup_windows_clients
 from utility.log import Log
 
@@ -228,23 +233,19 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         log.info("Cleaning up")
-        if is_windows:
-            for windows_client in windows_clients:
-                cmd = f"del /q /f {window_nfs_mount}\\*.*"
-                windows_client.exec_command(cmd=cmd)
-                cmd = f"umount {window_nfs_mount}"
-                windows_client.exec_command(cmd=cmd)
+        try:
+            if is_windows:
+                for windows_client in windows_clients:
+                    cmd = f"del /q /f {window_nfs_mount}\\*.*"
+                    windows_client.exec_command(cmd=cmd)
+                    cmd = f"umount {window_nfs_mount}"
+                    windows_client.exec_command(cmd=cmd)
 
-        # Cleaning up the client export and mount dir
-        for client in clients[:2]:
-            if Unmount(client).unmount(nfs_client_mount):
-                raise OperationFailedError(
-                    f"Failed to unmount nfs on {client.hostname}"
-                )
-            client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_client_mount}")
-        # Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_client)
-
-        # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+            # Extra client-access export/mount — remove only what this test created
+            cleanup_export_mount(clients[:2], nfs_client_mount)
+            delete_export(installer, nfs_export_client)
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("1client_access cleanup failed: %s", exc)
         log.info("Cleaning up successfull")
     return 0

@@ -1,4 +1,4 @@
-from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster
+from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster, wipe_export_contents
 
 from utility.log import Log
 
@@ -18,6 +18,8 @@ def run(ceph_cluster, **kw):
     nfs_export = "/export"
     fs = "cephfs"
     nfs_server_name = nfs_node.hostname
+    # Extra mount used for NFSv4.1 cthon pass
+    nfs_mount_v41 = "/mnt/nfsv4_1"
 
     log.info("Setup nfs cluster")
     try:
@@ -49,27 +51,42 @@ def run(ceph_cluster, **kw):
         out, _ = clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
         log.info(out)
 
-        # "mkdir -p /mnt/nfsv3",
-        # f"mount -t nfs -o vers=3 {nfs_node.ip_address}:{nfs_export} /mnt/nfsv3",
-        cmds = ["mkdir -p /mnt/nfsv4_1",
-                f"mount -t nfs -o vers=4.1 {nfs_node.ip_address}:{nfs_export}_1 /mnt/nfsv4_1"
-                ]
+        cmds = [
+            f"mkdir -p {nfs_mount_v41}",
+            f"mount -t nfs -o vers=4.1 {nfs_node.ip_address}:{nfs_export}_1 {nfs_mount_v41}",
+        ]
         for cmd in cmds:
             clients[0].exec_command(cmd=cmd, sudo=True)
-        #
-        # # Run Cthon test v3
-        # cmd = f"cd cthon04;./server -a -p {nfs_export}_1 -m /mnt/nfsv3 {nfs_node.ip_address}"
-        # out, _ = clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
-        # log.info(out)
 
         # Run Cthon test v4.1
-        cmd = f"cd cthon04;./server -a -p {nfs_export}_1 -m /mnt/nfsv4_1 {nfs_node.ip_address}"
+        cmd = (
+            f"cd cthon04;./server -a -p {nfs_export}_1 -m {nfs_mount_v41} "
+            f"{nfs_node.ip_address}"
+        )
         out, _ = clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
         log.info(out)
     except Exception as e:
         log.error(f"Error : {e}")
         return 1
     finally:
-        # sleep(30)
-        pass
+        # Wipe files + umount extras; leave static /export_N alone
+        try:
+            clients[0].exec_command(
+                sudo=True,
+                cmd=f"umount -l {nfs_mount_v41}",
+                check_ec=False,
+            )
+            clients[0].exec_command(
+                sudo=True, cmd=f"rm -rf {nfs_mount_v41}", check_ec=False
+            )
+        except Exception as exc:
+            log.warning("cthon extra-mount cleanup failed: %s", exc)
+        # First cthon pass and v4.1 both target /export_1
+        wipe_export_contents(
+            clients[0], nfs_node.ip_address, f"{nfs_export}_1", version="4.1", port=port
+        )
+        try:
+            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        except Exception as exc:
+            log.warning("cthon cleanup_cluster failed: %s", exc)
     return 0
