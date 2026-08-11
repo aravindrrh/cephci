@@ -3,7 +3,8 @@ from utility.log import Log
 
 log = Log(__name__)
 SSH = "~/.ssh"
-SSH_KEYGEN = f"ssh-keygen -b 2048 -f {SSH}/id_rsa -t rsa -q -N ''"
+# Force overwrite if id_rsa already exists (avoids interactive "Overwrite (y/n)?" hang)
+SSH_KEYGEN = f"yes | ssh-keygen -b 2048 -f {SSH}/id_rsa -t rsa -q -N ''"
 SSH_COPYID = "ssh-copy-id -f -i {} {}@{}"
 CEPH_PUB_KEY = "/etc/ceph/ceph.pub"
 
