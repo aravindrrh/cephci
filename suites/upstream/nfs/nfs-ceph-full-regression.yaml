@@ -1,0 +1,407 @@
+#===============================================================================================
+# Combined upstream NFS-Ganesha + Ceph regression suite
+#-----------------------------------------------------------------------------------------------
+# Conf: conf/tentacle/nfs/onecloud_1admin-7node-3client.yaml
+#       (or conf/squid/nfs/1admin-7node-3client.yaml family)
+#
+# Order:
+#   1. Deploy (pre-clean + bootstrap + hosts + OSD + clients)
+#   2. Cthon
+#   3. FIO
+#   4. IOZone
+#   5. Locktest
+#   6. LTP
+#   7. PyNFS
+#   8. SpecStorage
+#   9. ACL tests
+#  10. v3 scenarios
+#  11. Cleanup
+#
+# Why one suite: avoids re-bootstrap between tools; one cluster, sequential workloads.
+# Functional/tool tests use abort-on-fail: false so a single failure does not skip cleanup.
+#===============================================================================================
+tests:
+
+  # ---------------------------------------------------------------------------
+  # 1. Deploy
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Pre-clean Upstream NFS and Ceph artefacts
+      module: nfs_cleanup_upstream_ceph.py
+      desc: Wipe leftover cephadm/dnf artefacts and OSD disks before setup
+      abort-on-fail: false
+      config:
+        wipe_disks: true
+        remove_packages: true
+        remove_ganesha: true
+
+  - test:
+      name: Setup Upstream NFS and Ceph
+      module: nfs_setup_upstream_with_bootstrap.py
+      abort-on-fail: true
+
+  - test:
+      abort-on-fail: true
+      config:
+        args:
+          attach_ip_address: true
+          labels: apply-all-labels
+        command: add_hosts
+        service: host
+      desc: "Adding hosts to the cluster using labels and IP information."
+      destroy-cluster: false
+      module: test_host.py
+      name: "Test host add with labels and IP"
+
+  - test:
+      abort-on-fail: true
+      config:
+        args:
+          all-available-devices: true
+        command: apply
+        service: osd
+      desc: "Deploying OSD daemons using all-available-devices option."
+      destroy-cluster: false
+      module: test_osd.py
+      name: "Test apply osd with all-available-devices option"
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node4
+        copy_admin_keyring: true
+      desc: Configure the RGW,RBD client system
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.2
+        node: node5
+        copy_admin_keyring: true
+      desc: Configure the RGW,RBD client system
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.3
+        node: node6
+        copy_admin_keyring: true
+      desc: Configure the RGW,RBD client system
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.4
+        node: node7
+        copy_admin_keyring: true
+      desc: Configure the RGW,RBD client system
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  # ---------------------------------------------------------------------------
+  # 2. Cthon
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Nfs run Cthon Tests
+      module: upstream_nfs_cthon.py
+      desc: Verify Cthon tests on nfs ganesha with Cephfs FSAL
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  # ---------------------------------------------------------------------------
+  # 3. FIO
+  # ---------------------------------------------------------------------------
+  - test:
+      name: NFS FIO workloads (v3 and v4) on CephFS
+      module: upstream_nfs_fio.py
+      desc: >
+        Run fio (seq write/read, randrw) on NFSv3 and NFSv4.x mounts of
+        the first export (/export_0).
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  # ---------------------------------------------------------------------------
+  # 4. IOZone
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Nfs run IOZone tests
+      module: upstream_nfs_iozone.py
+      desc: Verify IOZone tests on nfs ganesha
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  # ---------------------------------------------------------------------------
+  # 5. Locktest
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Nfs run Locktest
+      module: upstream_nfs_locktest.py
+      desc: Verify locktest on nfs ganesha
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  # ---------------------------------------------------------------------------
+  # 6. LTP
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Nfs run LTP tests
+      module: upstream_nfs_ltp.py
+      desc: Verify LTP tests on nfs ganesha
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  # ---------------------------------------------------------------------------
+  # 7. PyNFS
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Nfs run PyNFS tests
+      module: upstream_nfs_pynfs.py
+      desc: Verify PyNFS tests on nfs ganesha
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+
+  # ---------------------------------------------------------------------------
+  # 8. SpecStorage
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Test nfs server with SPECstorage workload SWBUILD
+      module: upstream_nfs_spec_storage.py
+      desc: Test nfs server performance with SPECstorage workload SWBUILD
+      polarion-id:
+      abort-on-fail: false
+      config:
+        mount_point: /mnt/nfs
+        nfs_version: 4.1
+        benchmark: SWBUILD
+        load: 1
+        incr_load: 1
+        num_runs: 1
+        clients:
+          - client1
+        benchmark_defination:
+          Warmup_time: 30
+          Dir_count: 15
+          Files_per_dir: 30
+          File_size: 3k
+          Instances: 4
+
+  # ---------------------------------------------------------------------------
+  # 9. ACL tests
+  # ---------------------------------------------------------------------------
+  - test:
+      name: NFS ACL - Functional Tests (upstream Ganesha)
+      module: upstream_nfs_acl_functional.py
+      desc: >
+        Core NFSv4 ACL behaviour on upstream nfs-ganesha: ACL ops, ACE ordering,
+        permissions, identity, inheritance flags, POSIX interaction, symlinks,
+        recursive apply, persistence (rename, hardlink, ganesha restart).
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+        mount_type: nfs
+
+  - test:
+      name: NFS ACL - Negative Tests (upstream Ganesha)
+      module: upstream_nfs_acl_negative.py
+      desc: >
+        Denial and failure paths on upstream nfs-ganesha: invalid spec atomicity,
+        deny-before-allow, append-only, delete control, UID/GID cases, symlink -P vs -L.
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+        mount_type: nfs
+
+  - test:
+      name: NFS ACL - Scale Tests (upstream Ganesha)
+      module: upstream_nfs_acl_scale.py
+      desc: >
+        Large ACL handling on upstream nfs-ganesha: 2000+ ACEs, counts, random access,
+        performance, overwrite/append/duplicate, scale limit, persistence after remount.
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+        mount_type: nfs
+
+  # ---------------------------------------------------------------------------
+  # 10. v3 scenarios (from tier0-nfs-ganesha-v3.yaml)
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Nfs Ganesha File Lock
+      module: upstream_nfs_verify_file_lock.py
+      desc: Perform locking on same file from 2 different clients
+      polarion-id: CEPH-83577561
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 2
+
+  - test:
+      name: Nfs Verify Readdir Ops
+      module: upstream_nfs_verify_readdir_ops.py
+      desc: Perform readir operation from clients
+      polarion-id: CEPH-83577590
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 4
+
+  - test:
+      name: Nfs Ganesha rename operations
+      module: upstream_test_file_ops_renames.py
+      desc: Perform file and dir renaming and lookups in parallel
+      polarion-id: CEPH-83577594
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 3
+        num_files: 1000
+        num_dirs: 1000
+
+  - test:
+      name: Verify create file, create soflink and lookups from nfs clients
+      module: upstream_nfs_verify_file_ops_soft_links.py
+      desc: Verify create file, create soflink and lookups from nfs clients
+      polarion-id: CEPH-83577596
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 3
+        file_count: 100
+
+  - test:
+      name: Nfs Verify File Operations - ownership
+      module: upstream_nfs_verify_file_operations.py
+      desc: Change the ownership (user and group) of files within the NFS export
+      polarion-id: CEPH-83577601
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 3
+        file_count: 100
+        operations:
+          client01: create_files
+          client02: change_ownership
+          client03: perform_lookups
+
+  - test:
+      name: Nfs Verify File Operations - permissions
+      module: upstream_nfs_verify_file_operations.py
+      desc: Set different file permissions (read, write, execute) for files within the NFS
+      polarion-id: CEPH-83577602
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 3
+        file_count: 100
+        operations:
+          client01: create_files
+          client02: change_permission
+          client03: perform_lookups
+
+  - test:
+      name: Nfs export Readonly parameter
+      module: upstream_test_export_readonly.py
+      desc: Test NFS export with Readonly
+      polarion-id: CEPH-83578392
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 1
+
+  - test:
+      name: Nfs export rootsquash permission
+      module: upstream_test_export_rootsquash.py
+      desc: Test NFS export with rootsquash
+      polarion-id: CEPH-83578393
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 1
+
+  - test:
+      name: Nfs Verify locks over nfs mount with root_squash enabled
+      module: upstream_nfs_verify_file_lock_root_squash.py
+      desc: Perform lock on file with root_squash enabled
+      polarion-id: CEPH-83578386
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 4
+
+  - test:
+      name: NFS-Ganesha export config to mount with RO
+      desc: Verify edit export config to mount with RO
+      module: upstream_nfs_edit_export_config_with_ro.py
+      polarion-id: CEPH-83578395
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 1
+
+  - test:
+      name: NFS-Ganesha export config to mount with 1 client access
+      desc: Verify edit the export config to mount with allow access to only 1 client
+      module: upstream_nfs_edit_export_config_with_1client_access.py
+      polarion-id: CEPH-83578397
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 2
+
+  - test:
+      name: Nfs Verify setuid bit set on a file
+      module: upstream_nfs_verify_setuid_bit.py
+      desc: Verify setuid bit set on a file
+      polarion-id:
+      abort-on-fail: false
+      config:
+        nfs_version: 3
+        clients: 3
+        file_count: 100
+        operations:
+          client01: create_files
+          client02: setuid_bit
+          client03: perform_lookups
+
+  # ---------------------------------------------------------------------------
+  # 11. Cleanup
+  # ---------------------------------------------------------------------------
+  - test:
+      name: Cleanup Upstream NFS and Ceph
+      module: nfs_cleanup_upstream_ceph.py
+      desc: Remove cephadm/dnf Ceph artefacts and wipe OSD disks for a clean re-run
+      abort-on-fail: false
+      config:
+        wipe_disks: true
+        remove_packages: true
+        remove_ganesha: true
