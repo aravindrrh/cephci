@@ -10,8 +10,13 @@ class SpecStorageError(Exception):
     pass
 
 
+DEFAULT_SPEC_STORAGE_INSTALL_LOC = (
+    "http://magna002.ceph.redhat.com/spec_storage/"
+)
+
+
 class SpecStorage(Cli):
-    def __init__(self, primary_client):
+    def __init__(self, primary_client, install_loc=None):
         super(SpecStorage, self).__init__(primary_client)
         self.primary_client = primary_client
         self.packages = ["matplotlib", "PyYAML", "pylibyaml"]
@@ -20,7 +25,10 @@ class SpecStorage(Cli):
         self.base_cmd = f"python3 {self.install_dest}SPECstorage2020/SM2020"
         self.outputlog = "result"
         self.benchmark_file = "storage2020.yml"
-        self.install_loc = "http://magna002.ceph.redhat.com/spec_storage/"
+        raw_loc = install_loc or os.environ.get(
+            "SPEC_STORAGE_INSTALL_LOC", DEFAULT_SPEC_STORAGE_INSTALL_LOC
+        )
+        self.install_loc = raw_loc if raw_loc.endswith("/") else f"{raw_loc}/"
 
     def install_spec_storage(self):
         """
@@ -78,7 +86,10 @@ class SpecStorage(Cli):
         """
         try:
             # Add config file "sfc_rc"
-            cmd = f"wget  {self.install_loc}/{self.config} -O {self.install_dest}/{self.config}"
+            cmd = (
+                f"wget {self.install_loc}{self.config} "
+                f"-O {self.install_dest}/{self.config}"
+            )
             self.execute(sudo=True, cmd=cmd)
             # Update installer Location
             cmd = (

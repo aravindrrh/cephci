@@ -3,7 +3,7 @@ from time import sleep
 from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster
 
 from cli.exceptions import OperationFailedError
-from cli.io.spec_storage import SpecStorage
+from cli.io.spec_storage import DEFAULT_SPEC_STORAGE_INSTALL_LOC, SpecStorage
 from utility.log import Log
 
 log = Log(__name__)
@@ -60,8 +60,15 @@ def run(ceph_cluster, **kw):
         cmd = f"sshpass -p passwd ssh-copy-id -o StrictHostKeyChecking=no -f -i ~/.ssh/id_rsa.pub root@{clients[0].ip_address}"
         clients[0].exec_command(cmd=cmd, sudo=True, verbose=True)
 
-        log.info(f"Run SPECstorage with {benchmark} benchmark")
-        if SpecStorage(primary_client).run_spec_storage(
+        install_loc = config.get(
+            "spec_storage_install_loc", DEFAULT_SPEC_STORAGE_INSTALL_LOC
+        )
+        log.info(
+            "Run SPECstorage with %s benchmark (install_loc=%s)",
+            benchmark,
+            install_loc,
+        )
+        if SpecStorage(primary_client, install_loc=install_loc).run_spec_storage(
             benchmark,
             load,
             incr_load,

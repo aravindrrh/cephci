@@ -197,6 +197,8 @@ tests:
       polarion-id:
       abort-on-fail: false
       config:
+        # Onecloud cannot reach magna002; use internal mirror instead.
+        spec_storage_install_loc: "http://9.114.193.232/spec_storage/"
         mount_point: /mnt/nfs
         nfs_version: 4.1
         benchmark: SWBUILD
