@@ -28,6 +28,8 @@ def run(ceph_cluster, **kw):
                 "rm -rf ci-tests/",
                 "yum install -y git wget",
                 f"git clone https://github.com/aravindrrh/ci-tests; cd ci-tests; git checkout {DEFAULT_CI_TESTS_BRANCH}",
+                # client.sh clones cthon04; remove leftovers from prior runs.
+                "rm -rf cthon04/",
                 "sh ci-tests/build_scripts/storage-scale/client.sh"]
 
         for cmd in cmds:
