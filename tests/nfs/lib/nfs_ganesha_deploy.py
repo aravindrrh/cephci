@@ -65,21 +65,25 @@ def _run(node, cmd, timeout=7200, check=True):
     return rc
 
 
-def _ensure_scale_ganesha_conf(node, timeout=120):
+def _ensure_scale_ganesha_conf(node, timeout=120, nfs_export=None):
     """
     Point /etc/ganesha/ganesha.conf at Scale CES NFS config.
 
-    Only %include gpfs.ganesha.nfsd.conf — that file already pulls in
-    main/log/exports. Still mmccr fget all gpfs.ganesha*.conf so nested
-    includes resolve on disk.
+    Always mmccr fget every gpfs.ganesha*.conf from CCR into the local CES
+    config dir. Stale or empty on-disk copies are refreshed (mmnfs export add
+    updates CCR, not necessarily the local cache).
+
+    When *nfs_export* is set, verify gpfs.ganesha.exports.conf contains that path.
     """
     conf_dir_checks = " ".join(CES_NFS_CONFIG_DIRS)
     top_conf = CES_NFS_TOP_CONF
+    export_check = shlex.quote(nfs_export or "")
     script = f"""
 set -e
 CONF={shlex.quote(GANESHA_CONF)}
 MMFS_BIN={shlex.quote(MMFS_BIN)}
 TOP_CONF={shlex.quote(top_conf)}
+NFS_EXPORT={export_check}
 mkdir -p /etc/ganesha
 
 CONF_DIR=""
@@ -95,22 +99,42 @@ if [ -z "$CONF_DIR" ]; then
 fi
 echo "Using CES NFS config dir: $CONF_DIR"
 
-# Materialize every gpfs.ganesha* object from CCR (nfsd.conf nests the rest).
+fget_ccr_object() {{
+  local name="$1"
+  local dest="$CONF_DIR/$name"
+  echo "mmccr fget $name -> $dest"
+  if "$MMFS_BIN/mmccr" fget "$name" "$dest" 2>/dev/null; then
+    return 0
+  fi
+  if "$MMFS_BIN/mmccr" fget "$name" > "$dest"; then
+    return 0
+  fi
+  echo "ERROR: mmccr fget failed for $name" >&2
+  return 1
+}}
+
+# Materialize every gpfs.ganesha* object from CCR (authoritative; refresh always).
 echo "----- mmccr flist (ganesha) -----"
 CCR_LIST=$("$MMFS_BIN/mmccr" flist 2>/dev/null || "$MMFS_BIN/mmccr" ls 2>/dev/null || true)
+if [ -z "$CCR_LIST" ]; then
+  echo "ERROR: mmccr flist returned no objects" >&2
+  exit 1
+fi
 echo "$CCR_LIST" | grep -i ganesha || true
+GANESHA_COUNT=0
 while read -r name; do
   [ -z "$name" ] && continue
   case "$name" in
     gpfs.ganesha*.conf) ;;
     *) continue ;;
   esac
-  if [ ! -f "$CONF_DIR/$name" ]; then
-    echo "mmccr fget $name -> $CONF_DIR/$name"
-    "$MMFS_BIN/mmccr" fget "$name" "$CONF_DIR/$name" || \\
-      "$MMFS_BIN/mmccr" fget "$name" > "$CONF_DIR/$name" || true
-  fi
+  fget_ccr_object "$name"
+  GANESHA_COUNT=$((GANESHA_COUNT + 1))
 done < <(echo "$CCR_LIST" | awk '/gpfs\\.ganesha/ {{print $NF}}' | sort -u)
+if [ "$GANESHA_COUNT" -eq 0 ]; then
+  echo "ERROR: no gpfs.ganesha*.conf objects found in CCR" >&2
+  exit 1
+fi
 
 echo "----- ls -la $CONF_DIR -----"
 ls -la "$CONF_DIR" || true
@@ -118,6 +142,27 @@ ls -la "$CONF_DIR" || true
 if [ ! -f "$CONF_DIR/$TOP_CONF" ]; then
   echo "ERROR: missing $CONF_DIR/$TOP_CONF after mmccr fget" >&2
   exit 1
+fi
+
+EXPORTS_CONF="$CONF_DIR/gpfs.ganesha.exports.conf"
+if [ -n "$NFS_EXPORT" ]; then
+  if [ ! -s "$EXPORTS_CONF" ]; then
+    echo "ERROR: $EXPORTS_CONF is missing or empty after mmccr fget" >&2
+    exit 1
+  fi
+  if ! grep -qF "$NFS_EXPORT" "$EXPORTS_CONF"; then
+    echo "ERROR: $EXPORTS_CONF does not contain export path $NFS_EXPORT" >&2
+    echo "----- $EXPORTS_CONF -----" >&2
+    cat "$EXPORTS_CONF" >&2 || true
+    exit 1
+  fi
+  echo "Verified export path in $EXPORTS_CONF: $NFS_EXPORT"
+fi
+
+# ci-tests workaround: duplicate line in main.conf breaks Ganesha restart on some Scale builds.
+MAIN_CONF="$CONF_DIR/gpfs.ganesha.main.conf"
+if [ -f "$MAIN_CONF" ]; then
+  sed -i.bak -e '41d' "$MAIN_CONF" 2>/dev/null || true
 fi
 
 {{
@@ -436,19 +481,9 @@ def create_nfs_export(ceph_cluster, config=None):
         check=False,
     )
 
-    # Drop known duplicate line that breaks ganesha restart (ci-tests workaround).
-    # fixup = (
-    #     "sleep 30; "
-    #     'sed -i.bak -e "41d" /var/mmfs/ces/nfs-config/gpfs.ganesha.main.conf '
-    #     "2>/dev/null || true; "
-    #     'sed -i.bak -e "41d" /var/mmfs/nfs_config/gpfs.ganesha.main.conf '
-    #     "2>/dev/null || true; "
-    #     "sleep 15; systemctl daemon-reload"
-    # )
-    #  _run(node, f"bash -lc {shlex.quote(fixup)}", timeout=timeout, check=False)
-
     # Upstream RPM install overwrote stock ganesha.conf; restore Scale CES includes.
-    _ensure_scale_ganesha_conf(node, timeout=120)
+    _ensure_scale_ganesha_conf(node, timeout=120, nfs_export=nfs_export)
+    _run(node, "systemctl daemon-reload", timeout=60, check=False)
     _run(node, "systemctl start nfs-ganesha", timeout=timeout)
 
     out, _ = node.exec_command(
