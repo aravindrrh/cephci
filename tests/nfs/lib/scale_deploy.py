@@ -25,6 +25,12 @@ DEFAULT_S3_BUCKET = "centos-ci"
 DEFAULT_VERSION_KEY = "version_to_use.txt"
 DEFAULT_NSD_FILE = "/home/nsd1_scale_filedisk"
 DEFAULT_NSD_SIZE_MB = 8192
+# fstab-mounted build share on the installer node (node0).
+DEFAULT_SCALE_NFS_INSTALLER = (
+    "/mnt/gpfs_builds/u/images/SPECTRUM_SCALE/6.0.2/Spectrum_Scale_Product/"
+    "GA_Distribution/SE_Packages/Daily/latest/x86_64/"
+    "Storage_Scale_Developer-6.0.2.0-x86_64-Linux-install"
+)
 # Written when deploy reuses an existing Scale cluster (same VERSION_TO_USE).
 SCALE_REUSE_MARKER = "/root/.cephci_scale_reuse"
 
@@ -37,6 +43,8 @@ SCALE_PREREQ_PACKAGES = (
 
 # Product version like 5.2.3 or 5.2.3.1 inside zip names / RPM versions.
 _VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+){0,3})")
+# Release directory in gpfs_builds paths, e.g. .../SPECTRUM_SCALE/6.0.2/...
+_PATH_RELEASE_RE = re.compile(r"/SPECTRUM_SCALE/(\d+\.\d+\.\d+)(?:/|$)")
 
 
 def _run(node, cmd, timeout=7200, check=True):
@@ -125,6 +133,78 @@ def scale_versions_equal(left, right):
     return pa == pb
 
 
+def scale_product_release(value, path_hint=None, config=None):
+    """
+    Return major.minor.maintenance (e.g. ``6.0.2``) for reuse decisions.
+
+    Daily builds may differ in the fourth segment (``6.0.2.0`` vs ``6.0.2.5``);
+    compare at product-release level so the cluster is reused within a release.
+
+    Resolution order:
+      1. ``scale_product_release`` config override
+      2. ``.../SPECTRUM_SCALE/<release>/...`` path component (path_hint)
+      3. First three segments of the version parsed from *value*
+    """
+    conf = config or {}
+    override = conf.get("scale_product_release")
+    if override:
+        ver = normalize_scale_version(str(override))
+    elif path_hint:
+        match = _PATH_RELEASE_RE.search(str(path_hint))
+        if match:
+            ver = match.group(1)
+        else:
+            ver = normalize_scale_version(value)
+    else:
+        ver = normalize_scale_version(value)
+
+    if not ver:
+        return ""
+    parts = ver.split(".")
+    if len(parts) >= 3:
+        return ".".join(parts[:3])
+    return ver
+
+
+def scale_product_releases_equal(left, right, path_hint=None, config=None):
+    """True when *left* and *right* denote the same Scale product release."""
+    a = scale_product_release(left, path_hint=path_hint, config=config)
+    b = scale_product_release(right, config=config)
+    return bool(a) and a == b
+
+
+def _resolve_nfs_share_path(config):
+    """Return the nfs_share installer path from config or the default."""
+    conf = config or {}
+    return conf.get("scale_nfs_share_path") or DEFAULT_SCALE_NFS_INSTALLER
+
+
+def _stage_installer_from_nfs_share_script(share_path, work_dir):
+    """Shell script: resolve *latest* symlinks and stage zip or -Linux-install."""
+    quoted_share = shlex.quote(share_path)
+    quoted_work = shlex.quote(work_dir)
+    return (
+        f"SHARE=$(readlink -f {quoted_share})\n"
+        f'test -e "$SHARE" || {{ echo "Scale installer not found: {quoted_share}" >&2; exit 1; }}\n'
+        f"mkdir -p {quoted_work}/INSTALLER_PATH\n"
+        f"rm -rf {quoted_work}/INSTALLER_PATH/*\n"
+        'case "$SHARE" in\n'
+        "  *-Linux-install)\n"
+        f'    cp -f "$SHARE" {quoted_work}/INSTALLER_PATH/\n'
+        f"    chmod +x {quoted_work}/INSTALLER_PATH/*\n"
+        "    ;;\n"
+        "  *.zip)\n"
+        f'    cp -f "$SHARE" {quoted_work}/\n'
+        f'    unzip -o "$(basename "$SHARE")" -d {quoted_work}/INSTALLER_PATH/\n'
+        "    ;;\n"
+        "  *)\n"
+        '    echo "Unsupported Scale installer artifact: $SHARE" >&2\n'
+        "    exit 1\n"
+        "    ;;\n"
+        "esac\n"
+    )
+
+
 def _ensure_aws_cli(installer, timeout):
     """Install AWS CLI v2 if missing; raise if still unavailable."""
     _run(
@@ -157,15 +237,11 @@ def fetch_version_to_use(installer, config=None):
     source = str(conf.get("scale_installer_source", "s3")).lower()
 
     if source == "nfs_share":
-        share_path = conf.get("scale_nfs_share_path")
-        if not share_path:
-            raise ConfigError(
-                "scale_installer_source=nfs_share requires scale_nfs_share_path"
-            )
-        # Zip basename is the desired version artifact name.
+        share_path = _resolve_nfs_share_path(conf)
+        # Artifact basename is logged as VERSION_TO_USE; release compare uses path/filename.
         return _run_out(
             installer,
-            f"bash -lc {shlex.quote(f'basename {share_path}')}",
+            f"bash -lc {shlex.quote(f'basename $(readlink -f {share_path})')}",
             timeout=60,
         )
 
@@ -244,6 +320,7 @@ def should_reuse_existing_scale(ceph_cluster, config=None):
 
     Config:
       force_scale_redeploy: if true, never reuse
+      scale_product_release: optional override (e.g. ``6.0.2``) for reuse compare
     """
     conf = config or {}
     if conf.get("force_scale_redeploy"):
@@ -255,30 +332,40 @@ def should_reuse_existing_scale(ceph_cluster, config=None):
     roles = resolve_scale_roles(ceph_cluster)
     installer = roles["installer"]
 
+    source = str(conf.get("scale_installer_source", "s3")).lower()
+    share_path = _resolve_nfs_share_path(conf) if source == "nfs_share" else ""
+
     desired_raw = fetch_version_to_use(installer, conf)
     installed_raw = get_installed_scale_version(installer)
-    desired = normalize_scale_version(desired_raw)
-    installed = normalize_scale_version(installed_raw)
+    desired = scale_product_release(
+        desired_raw, path_hint=share_path or desired_raw, config=conf
+    )
+    installed = scale_product_release(installed_raw, config=conf)
 
     log.info(
-        "Scale version check: VERSION_TO_USE=%s (%s) installed=%s (%s)",
+        "Scale version check: artifact=%s release=%s installed=%s (%s)",
         desired_raw,
         desired or "?",
         installed_raw or "(none)",
         installed or "?",
     )
 
-    if not desired or not installed or not scale_versions_equal(desired, installed):
+    if (
+        not desired
+        or not installed
+        or not scale_product_releases_equal(
+            desired_raw, installed_raw, path_hint=share_path or desired_raw, config=conf
+        )
+    ):
         return False, desired
     if not scale_cluster_healthy(installer):
         log.warning(
-            "Versions match (%s ~ %s) but Scale cluster is not healthy — will redeploy",
+            "Releases match (%s) but Scale cluster is not healthy — will redeploy",
             desired,
-            installed,
         )
         return False, desired
     log.info(
-        "Reusing existing Scale cluster (VERSION_TO_USE=%s ~ installed=%s)",
+        "Reusing existing Scale cluster (release=%s ~ installed=%s)",
         desired,
         installed,
     )
@@ -320,10 +407,12 @@ def download_scale(installer, config=None):
         scale_installer_source: ``s3`` (default) or ``nfs_share``
         scale_s3_bucket: S3 bucket (default centos-ci)
         scale_s3_version_key: key for version file (default version_to_use.txt)
-        scale_nfs_share_path: path when source is nfs_share
+        scale_nfs_share_path: installer path when source is nfs_share (default
+            DEFAULT_SCALE_NFS_INSTALLER under /mnt/gpfs_builds)
         deploy_timeout: command timeout seconds
 
     Assumes AWS_ACCESS_KEY / AWS_SECRET_KEY are already set on the target for S3.
+    nfs_share reads from a local mount (e.g. /mnt/gpfs_builds); no AWS needed.
     """
     conf = config or {}
     timeout = int(conf.get("deploy_timeout", 7200))
@@ -346,22 +435,14 @@ def download_scale(installer, config=None):
     )
 
     if source == "nfs_share":
-        share_path = conf.get("scale_nfs_share_path")
-        if not share_path:
-            raise ConfigError(
-                "scale_installer_source=nfs_share requires scale_nfs_share_path"
-            )
-        copy_script = (
-            f"cp -f {share_path} {work_dir}/ && "
-            f"cd {work_dir} && rm -rf INSTALLER_PATH && mkdir -p INSTALLER_PATH && "
-            f"unzip -o $(basename {share_path}) -d INSTALLER_PATH/"
-        )
+        share_path = _resolve_nfs_share_path(conf)
+        stage_script = _stage_installer_from_nfs_share_script(share_path, work_dir)
         _run(
             installer,
-            f"bash -lc {shlex.quote(copy_script)}",
+            f"bash -lc {shlex.quote(stage_script)}",
             timeout=timeout,
         )
-        return {"work_dir": work_dir, "source": source}
+        return {"work_dir": work_dir, "source": source, "share_path": share_path}
 
     if source != "s3":
         raise ConfigError(f"Unsupported scale_installer_source: {source}")

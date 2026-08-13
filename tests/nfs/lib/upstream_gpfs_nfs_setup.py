@@ -163,11 +163,12 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
         force_scale_redeploy: ignore version match and reinstall Scale
         gerrit_host / gerrit_project / gerrit_refspec (or ganesha_repo /
             ganesha_branch): Ganesha source location
-        scale_fs, ces_ip, scale_installer_source: see scale_deploy.py
+        scale_fs, ces_ip, scale_installer_source, scale_nfs_share_path,
+        scale_product_release: see scale_deploy.py
         use_ci_tests_script: if true, fall back to legacy shell script path
 
-    When S3 VERSION_TO_USE matches the installed Scale version, Scale install
-    is skipped and a Ganesha-only cleanup runs before rebuilding Ganesha.
+    When the Scale product release (e.g. 6.0.2) matches the installed release,
+    Scale install is skipped and a Ganesha-only cleanup runs before rebuilding Ganesha.
     If the version changed (or Scale residue is present), a full Scale wipe
     runs first, then Scale install.
     """

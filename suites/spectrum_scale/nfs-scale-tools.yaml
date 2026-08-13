@@ -21,6 +21,8 @@ tests:
       config:
         clients: 2
         nfs_export: /ibm/scale_volume/export1
+        scale_installer_source: nfs_share
+        # scale_nfs_share_path: optional; defaults to Daily/latest under /mnt/gpfs_builds
   - test:
       name: Lock test
       module: upstream_nfs_lock_test.py
