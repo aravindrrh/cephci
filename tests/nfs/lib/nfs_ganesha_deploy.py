@@ -437,15 +437,15 @@ def create_nfs_export(ceph_cluster, config=None):
     )
 
     # Drop known duplicate line that breaks ganesha restart (ci-tests workaround).
-    fixup = (
-        "sleep 30; "
-        'sed -i.bak -e "41d" /var/mmfs/ces/nfs-config/gpfs.ganesha.main.conf '
-        "2>/dev/null || true; "
-        'sed -i.bak -e "41d" /var/mmfs/nfs_config/gpfs.ganesha.main.conf '
-        "2>/dev/null || true; "
-        "sleep 15; systemctl daemon-reload"
-    )
-    _run(node, f"bash -lc {shlex.quote(fixup)}", timeout=timeout, check=False)
+    # fixup = (
+    #     "sleep 30; "
+    #     'sed -i.bak -e "41d" /var/mmfs/ces/nfs-config/gpfs.ganesha.main.conf '
+    #     "2>/dev/null || true; "
+    #     'sed -i.bak -e "41d" /var/mmfs/nfs_config/gpfs.ganesha.main.conf '
+    #     "2>/dev/null || true; "
+    #     "sleep 15; systemctl daemon-reload"
+    # )
+    #  _run(node, f"bash -lc {shlex.quote(fixup)}", timeout=timeout, check=False)
 
     # Upstream RPM install overwrote stock ganesha.conf; restore Scale CES includes.
     _ensure_scale_ganesha_conf(node, timeout=120)
