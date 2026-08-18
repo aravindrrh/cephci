@@ -89,8 +89,9 @@ tests:
         skip_deployment: true
         clients: 2
         nfs_export: /ibm/scale_volume/export1
+        
   - test:
-      name: SPECstorage
+      name: SPECstorage SWBUILD
       module: upstream_nfs_spec_storage.py
       desc: SPECstorage SWBUILD on Scale-backed NFS
       abort-on-fail: false
@@ -110,6 +111,46 @@ tests:
           Dir_count: 15
           Files_per_dir: 30
           File_size: 3k
+          Instances: 4
+
+  - test:
+      name: SPECstorage VDA
+      module: upstream_nfs_spec_storage.py
+      desc: SPECstorage VDA on Scale-backed NFS
+      abort-on-fail: false
+      timeout: 21600
+      config:
+        skip_deployment: true
+        clients: 2
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume/export1
+        nfs_version: "4.1"
+        benchmark: VDA
+        load: 1
+        incr_load: 1
+        num_runs: 1
+        benchmark_defination:
+          Warmup_time: 30
+          Instances: 4
+
+  - test:
+      name: SPECstorage EDA
+      module: upstream_nfs_spec_storage.py
+      desc: SPECstorage EDA_BLENDED on Scale-backed NFS
+      abort-on-fail: false
+      timeout: 21600
+      config:
+        skip_deployment: true
+        clients: 2
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume/export1
+        nfs_version: "4.1"
+        benchmark: EDA_BLENDED
+        load: 1
+        incr_load: 1
+        num_runs: 1
+        benchmark_defination:
+          Warmup_time: 30
           Instances: 4
 
   - test:
