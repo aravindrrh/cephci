@@ -80,6 +80,40 @@ class SpecStorage(Cli):
         except Exception as exc:
             raise SpecStorageError(f"SPECstorage installation failed: {exc}") from exc
 
+    def _sed_benchmark_parameter(self, benchmark_yml, benchmark, parameter, value):
+        """Update a workload parameter only inside the named benchmark block."""
+        bench_anchor = f"- {benchmark}:"
+        sed_cmd = (
+            f"sed -i '/{bench_anchor}/,/^[[:space:]]*- Benchmark_name:/{{"
+            f" /^[[:space:]]*- Benchmark_name:/!s/{parameter}:.*/{parameter}: {value}/;"
+            f" }}' {benchmark_yml}"
+        )
+        self._execute_checked(sed_cmd)
+
+    def _collect_netmist_logs(self, results_dir="/root/results"):
+        """Gather netmist client/nodemanager logs after a failed run."""
+        log_chunks = []
+        try:
+            dir_items = self.primary_client.get_dir_list(results_dir, sudo=True)
+        except Exception as exc:
+            return f"Failed to list {results_dir}: {exc}"
+
+        for item in sorted(dir_items):
+            if not (item.startswith("netmist_") and item.endswith(".log")):
+                continue
+            try:
+                content = self.primary_client.remote_file(
+                    file_name=f"{results_dir}/{item}",
+                    file_mode="r",
+                    sudo=True,
+                )
+                log_chunks.append(f"--- {item} ---\n{content}")
+            except Exception as exc:
+                log_chunks.append(f"--- {item} (unreadable: {exc}) ---")
+        if not log_chunks:
+            return f"No netmist logs found under {results_dir}"
+        return "\n".join(log_chunks)
+
     def update_config(
         self,
         benchmark,
@@ -126,9 +160,8 @@ class SpecStorage(Cli):
 
             if benchmark_defination:
                 for parameter, value in benchmark_defination.items():
-                    self._execute_checked(
-                        f"sed -i '/Benchmark_name:/,/{parameter}:/ s/{parameter}:.*/{parameter}: {value}/'"
-                        f" {benchmark_yml}"
+                    self._sed_benchmark_parameter(
+                        benchmark_yml, benchmark, parameter, value
                     )
         except SpecStorageError:
             raise
@@ -185,8 +218,11 @@ class SpecStorage(Cli):
             check_ec=False,
         )
         if exit_code != 0:
+            netmist_logs = self._collect_netmist_logs()
             raise SpecStorageError(
-                f"SPECstorage run failed (exit {exit_code}): {cmd}\nstdout: {_out}\nstderr: {_err}"
+                f"SPECstorage run failed (exit {exit_code}): {cmd}\n"
+                f"stdout: {_out}\nstderr: {_err}\n\n"
+                f"Netmist logs:\n{netmist_logs}"
             )
         return 0
 

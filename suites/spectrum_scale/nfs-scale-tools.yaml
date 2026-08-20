@@ -131,7 +131,10 @@ tests:
         num_runs: 1
         benchmark_defination:
           Warmup_time: 30
-          Instances: 4
+          Dir_count: 1
+          Files_per_dir: 1
+          File_size: 3k
+          Instances: 1
 
   - test:
       name: SPECstorage EDA
@@ -151,7 +154,10 @@ tests:
         num_runs: 1
         benchmark_defination:
           Warmup_time: 30
-          Instances: 4
+          Dir_count: 1
+          Files_per_dir: 1
+          File_size: 3k
+          Instances: 1
 
   - test:
       name: Pynfs

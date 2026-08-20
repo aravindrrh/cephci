@@ -1,9 +1,10 @@
 #===============================================================================================
-# Spectrum Scale — SPECstorage only (SWBUILD).
+# Spectrum Scale — SPECstorage only (SWBUILD, VDA, EDA_BLENDED).
 #
 # Conf: conf/spectrum_scale/spectrum_scale_2node.yaml (installer + 2 clients)
 #
-# Deploy Scale / NFS once, then run SPECstorage SWBUILD on the shared export.
+# Deploy Scale / NFS once, then run all three SPECstorage workloads on the shared export.
+# Each test skips redeploy and cleans up NFS mounts before the next run.
 #===============================================================================================
 tests:
 
@@ -16,8 +17,10 @@ tests:
       config:
         clients: 2
         nfs_export: /ibm/scale_volume/export1
+        scale_installer_source: nfs_share
+
   - test:
-      name: SPECstorage
+      name: SPECstorage SWBUILD
       module: upstream_nfs_spec_storage.py
       desc: SPECstorage SWBUILD on Scale-backed NFS
       abort-on-fail: false
@@ -38,3 +41,60 @@ tests:
           Files_per_dir: 30
           File_size: 3k
           Instances: 4
+
+  - test:
+      name: SPECstorage VDA
+      module: upstream_nfs_spec_storage.py
+      desc: SPECstorage VDA on Scale-backed NFS
+      abort-on-fail: false
+      timeout: 21600
+      config:
+        skip_deployment: true
+        clients: 2
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume/export1
+        nfs_version: "4.1"
+        benchmark: VDA
+        load: 1
+        incr_load: 1
+        num_runs: 1
+        benchmark_defination:
+          Warmup_time: 30
+          Dir_count: 1
+          Files_per_dir: 1
+          File_size: 3k
+          Instances: 1
+
+  - test:
+      name: SPECstorage EDA
+      module: upstream_nfs_spec_storage.py
+      desc: SPECstorage EDA_BLENDED on Scale-backed NFS
+      abort-on-fail: false
+      timeout: 21600
+      config:
+        skip_deployment: true
+        clients: 2
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume/export1
+        nfs_version: "4.1"
+        benchmark: EDA_BLENDED
+        load: 1
+        incr_load: 1
+        num_runs: 1
+        benchmark_defination:
+          Warmup_time: 30
+          Dir_count: 1
+          Files_per_dir: 1
+          File_size: 3k
+          Instances: 1
+
+  - test:
+      name: Spectrum Scale NFS cleanup
+      module: upstream_nfs_cleanup.py
+      desc: Uninstall Ganesha RPMs, remove clones (Scale preserved by default)
+      abort-on-fail: false
+      timeout: 7200
+      config:
+        clients: 2
+        scale_fs: scale_volume
+        nfs_export: /ibm/scale_volume/export1
