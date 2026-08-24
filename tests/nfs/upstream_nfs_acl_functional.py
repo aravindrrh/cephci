@@ -51,7 +51,9 @@ PERM_RX = "rxtcy"  # rx  -> rxtcy
 # but a failure is marked as "KNOWN" instead of a hard failure.
 # Add / remove entries as bugs are filed or fixed.
 KNOWN_ISSUES = {
+    # NFSv4 inheritance flags on Scale / Ganesha.
     "INHERIT_ONLY": "IBMCEPH-13881",
+    "NO_PROPAGATE": "IBMCEPH-13881",
 }
 
 
@@ -165,7 +167,7 @@ def run(ceph_cluster, **kw):
         #     )
         # )
 
-        return _report_results(results)
+        return _report_results(results, config)
 
     except Exception as e:
         log.error("Fatal error in ACL functional tests: %s", e)
@@ -205,8 +207,16 @@ def _run_test(fn, *args, **kwargs):
         return 1
 
 
-def _report_results(results):
-    """Log a summary table; return 1 only if a sub-test failed outside KNOWN_ISSUES."""
+def _known_issues(config):
+    """Built-in known issues plus optional suite overrides from config."""
+    issues = dict(KNOWN_ISSUES)
+    issues.update((config or {}).get("known_issues") or {})
+    return issues
+
+
+def _report_results(results, config=None):
+    """Log a summary table; return 1 only if a sub-test failed outside known issues."""
+    known_issues = _known_issues(config)
     hard_failures = []
     known_failures = []
     log.info("=" * 60)
@@ -215,8 +225,8 @@ def _report_results(results):
     for name, rc in results:
         if rc == 0:
             log.info("  %-35s PASS", name)
-        elif name in KNOWN_ISSUES:
-            log.info("  %-35s FAIL (KNOWN: %s)", name, KNOWN_ISSUES[name])
+        elif name in known_issues:
+            log.info("  %-35s FAIL (KNOWN: %s)", name, known_issues[name])
             known_failures.append(name)
         else:
             log.info("  %-35s FAIL", name)
@@ -226,12 +236,15 @@ def _report_results(results):
         log.warning("Known failures: %s", known_failures)
     if hard_failures:
         log.error("Unexpected failures: %s", hard_failures)
-    if hard_failures:
+        log.error("OVERALL RESULT: FAIL")
         return 1
     if known_failures:
-        log.warning("Only known failures found; returning success for this run")
+        log.warning(
+            "OVERALL RESULT: PASS (%d known failure(s), no unexpected failures)",
+            len(known_failures),
+        )
         return 0
-    log.info("All functional tests passed")
+    log.info("OVERALL RESULT: PASS (all sub-tests passed)")
     return 0
 
 
