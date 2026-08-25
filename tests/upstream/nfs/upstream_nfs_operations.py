@@ -605,6 +605,19 @@ def permission(client, nfs_name, nfs_export, old_permission, new_permission):
     sleep(10)
 
 
+def prepare_v3_lock_clients(clients):
+    """Ensure NFSv3 lock manager dependencies are running on NFS clients."""
+    if not isinstance(clients, list):
+        clients = [clients]
+    for client in clients:
+        for svc in ("rpcbind", "rpc-statd"):
+            client.exec_command(
+                sudo=True,
+                cmd=f"systemctl enable --now {svc}",
+                check_ec=False,
+            )
+
+
 def enable_v3_locking(nfs_node):
     # stop ganesha service
     pid = ""
@@ -624,9 +637,12 @@ def enable_v3_locking(nfs_node):
     cmd = "sed -i 's/^\(\s*Enable_NLM\s*=\s*\)false;/    Enable_NLM = true;/I' /etc/ganesha/ganesha.conf"
     nfs_node.exec_command(sudo=True, cmd=cmd)
 
-    #start rpc-statd service
-    cmd = "systemctl start rpc-statd"
-    nfs_node.exec_command(sudo=True, cmd=cmd)
+    for svc in ("rpcbind", "rpc-statd"):
+        nfs_node.exec_command(
+            sudo=True,
+            cmd=f"systemctl enable --now {svc}",
+            check_ec=False,
+        )
 
     # Restart Ganesha
     cmd = f"nfs-ganesha/build/ganesha.nfsd -f /etc/ganesha/ganesha.conf -L /var/log/ganesha.log"
@@ -639,9 +655,13 @@ def enable_v3_locking(nfs_node):
 
     if not pid:
         raise OperationFailedError("Failed to restart nfs service")
-    # Open the NLM port
-    #ports_to_open = ["nlockmgr", "mountd"]
-    #open_mandatory_v3_ports(nfs_node, ports_to_open)
+
+    # nlockmgr must be reachable from clients once NLM is enabled
+    sleep(5)
+    try:
+        open_mandatory_v3_ports(nfs_node, ["nlockmgr"])
+    except Exception as exc:
+        log.warning("Could not open nlockmgr firewall port: %s", exc)
 
 
 def getfattr(client, file_path, attribute_name=None):

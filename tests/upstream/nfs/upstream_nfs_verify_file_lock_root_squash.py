@@ -4,12 +4,13 @@ from time import sleep
 from upstream_nfs_operations import (
     cleanup_cluster,
     cleanup_export_mount,
+    create_export,
     delete_export,
     enable_v3_locking,
+    prepare_v3_lock_clients,
     setup_nfs_cluster,
 )
 
-from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
 from cli.utilities.filesys import Mount
 from utility.log import Log
@@ -17,27 +18,10 @@ from utility.log import Log
 log = Log(__name__)
 
 
-def rootsquash_using_conf(
-    client, nfs_name, nfs_export_squash, original_squash_value, new_squash_value
-):
-    """Create rootsquash using conf file
-    Args:
-        client(obj): client object
-        nfs_name(str): nfs server name
-        nfs_export_squash(str): nfs squash export name
-        original_squash_value(str): original squash value in conf file
-        new_squash_value(str): new squash value in conf file
-    """
-    try:
-        out = Ceph(client).nfs.export.get(nfs_name, nfs_export_squash)
-        client.exec_command(sudo=True, cmd=f"echo '{out}' > export.conf")
-        client.exec_command(
-            sudo=True,
-            cmd=f"sed -i 's/{original_squash_value}/{new_squash_value}/g' export.conf",
-        )
-        Ceph(client).nfs.export.apply(nfs_name, "export.conf")
-    except Exception:
-        raise OperationFailedError("failed to enable rootsquash using conf file")
+def _is_lock_contention_error(exc):
+    """True when flock failed because another client holds the lock."""
+    err = str(exc)
+    return "Errno 11" in err or "Resource temporarily unavailable" in err
 
 
 def get_file_lock(client, file_path="/mnt/nfs_squash/sample_file", hold_seconds=30):
@@ -99,8 +83,6 @@ def run(ceph_cluster, **kw):
     # Squashed export parameters
     nfs_export_squash = "/export_squash"
     nfs_squash_mount = "/mnt/nfs_squash"
-    original_squash_value = '"squash": "none"'
-    new_squash_value = '"squash": "rootsquash"'
 
     try:
         setup_nfs_cluster(
@@ -116,26 +98,18 @@ def run(ceph_cluster, **kw):
             ceph_cluster=ceph_cluster,
         )
 
-        # Create export
+        # Create rootsquash export via ganesha.conf (upstream manual ganesha path)
+        create_export(installer, nfs_export_squash, squash="rootsquash")
 
-        Ceph(clients[0]).nfs.export.create(
-            fs_name=fs_name,
-            nfs_name=nfs_name,
-            nfs_export=nfs_export_squash,
-            fs=fs_name,
-            installer=installer
-        )
-
-        # Enable NLM before mounting — ganesha restart after mount leaves stale handles.
         if version == 3:
             enable_v3_locking(installer)
+            prepare_v3_lock_clients(clients[:2])
             sleep(5)
 
-        # Mount the volume with rootsquash enable on client 1 and 2
+        # Mount the squashed export on client 1 and 2
         for client in clients[:2]:
             client.create_dirs(dir_path=nfs_squash_mount, sudo=True)
 
-        # Change the permission of mount dir and mount the exports
         for client in clients[:2]:
             if Mount(client).nfs(
                 mount=nfs_squash_mount,
@@ -143,21 +117,10 @@ def run(ceph_cluster, **kw):
                 port=port,
                 server=installer.ip_address,
                 export=nfs_export_squash,
-                other_opts="local_lock=posix",
             ):
                 raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
             client.exec_command(sudo=True, cmd=f"chmod 777 {nfs_squash_mount}/")
         log.info("Mount succeeded on client")
-
-        # Enable rootsquash using conf file
-        rootsquash_using_conf(
-            clients[1],
-            nfs_name,
-            nfs_export_squash,
-            original_squash_value,
-            new_squash_value,
-        )
-        sleep(5)
 
     except Exception as e:
         log.error(f"Failed to setup nfs cluster with rootsquash enabled : Error - {e}")
@@ -192,9 +155,15 @@ def run(ceph_cluster, **kw):
             )
             rc = 1
         except Exception as e:
-            log.info(
-                f"Expected: Failed to acquire lock from client 2 while client 1 lock is in on {e}"
-            )
+            if _is_lock_contention_error(e):
+                log.info(
+                    f"Expected: Failed to acquire lock from client 2 while client 1 lock is in on {e}"
+                )
+            else:
+                log.error(
+                    f"Unexpected lock error during contention (expected EAGAIN/EWOULDBLOCK, not ENOLCK): {e}"
+                )
+                rc = 1
 
         c1.join()
 

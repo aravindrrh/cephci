@@ -7,6 +7,7 @@ from upstream_nfs_operations import (
     create_export,
     delete_export,
     enable_v3_locking,
+    prepare_v3_lock_clients,
     setup_nfs_cluster,
     analyze_ganesha_cores,
 )
@@ -16,6 +17,12 @@ from cli.utilities.filesys import Mount
 from utility.log import Log
 
 log = Log(__name__)
+
+
+def _is_lock_contention_error(exc):
+    """True when flock failed because another client holds the lock."""
+    err = str(exc)
+    return "Errno 11" in err or "Resource temporarily unavailable" in err
 
 
 def get_file_lock(client, file_path="/mnt/nfs_lock_mount/sample_file", hold_seconds=30):
@@ -102,6 +109,7 @@ def run(ceph_cluster, **kw):
     # ganesha kill leaves stale handles and breaks v3 flock (ENOLCK).
     if version == 3:
         enable_v3_locking(installer)
+        prepare_v3_lock_clients(clients[:2])
         sleep(5)
 
     rc = 1
@@ -115,7 +123,6 @@ def run(ceph_cluster, **kw):
                 port=port,
                 server=installer.ip_address,
                 export=nfs_lock_export,
-                other_opts="local_lock=posix",
             ):
                 raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
         log.info("Mount succeeded on client")
@@ -139,9 +146,15 @@ def run(ceph_cluster, **kw):
             )
             rc = 1
         except Exception as e:
-            log.info(
-                f"Expected: Failed to acquire lock from client 2 while client 1 lock is in on {e}"
-            )
+            if _is_lock_contention_error(e):
+                log.info(
+                    f"Expected: Failed to acquire lock from client 2 while client 1 lock is in on {e}"
+                )
+            else:
+                log.error(
+                    f"Unexpected lock error during contention (expected EAGAIN/EWOULDBLOCK, not ENOLCK): {e}"
+                )
+                rc = 1
 
         c1.join()
 
