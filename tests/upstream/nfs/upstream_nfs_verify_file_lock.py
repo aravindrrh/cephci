@@ -18,14 +18,33 @@ from utility.log import Log
 log = Log(__name__)
 
 
-def get_file_lock(client):
+def get_file_lock(client, file_path="/mnt/nfs_lock_mount/sample_file", hold_seconds=30):
     """
     Gets the file lock on the file
     Args:
         client (ceph): Ceph client node
+        file_path (str): Path to the file to lock
+        hold_seconds (int): How long to hold the lock before releasing
     """
-    cmd = """python3 -c 'from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN;from time import sleep;f = open(
-"/mnt/nfs_lock_mount/sample_file", "w");flock(f.fileno(), LOCK_EX | LOCK_NB);sleep(30);flock(f.fileno(), LOCK_UN)'"""
+    cmd = (
+        "python3 -c 'from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN;"
+        "from time import sleep;"
+        f'f = open("{file_path}", "w");'
+        "flock(f.fileno(), LOCK_EX | LOCK_NB);"
+        f"sleep({hold_seconds});"
+        "flock(f.fileno(), LOCK_UN)'"
+    )
+    client.exec_command(cmd=cmd, sudo=True)
+
+
+def try_acquire_file_lock(client, file_path="/mnt/nfs_lock_mount/sample_file"):
+    """Acquire and immediately release a lock; used after client 1 has released."""
+    cmd = (
+        "python3 -c 'from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN;"
+        f'f = open("{file_path}", "w");'
+        "flock(f.fileno(), LOCK_EX | LOCK_NB);"
+        "flock(f.fileno(), LOCK_UN)'"
+    )
     client.exec_command(cmd=cmd, sudo=True)
 
 
@@ -78,6 +97,13 @@ def run(ceph_cluster, **kw):
 
     # Create export for locking test
     create_export(installer, nfs_lock_export)
+
+    # Enable NLM and restart Ganesha before mounting — remounting after a
+    # ganesha kill leaves stale handles and breaks v3 flock (ENOLCK).
+    if version == 3:
+        enable_v3_locking(installer)
+        sleep(5)
+
     rc = 1
     try:
         # Mount the export on 2 clients in parallel
@@ -94,12 +120,9 @@ def run(ceph_cluster, **kw):
                 raise OperationFailedError(f"Failed to mount nfs on {client.hostname}")
         log.info("Mount succeeded on client")
 
-        # Check the mount protocol
-        if version == 3:
-            enable_v3_locking(installer)
-
-        # Create a file on Client 1
+        # Create a file on Client 1 (drop stale file/locks from prior runs)
         file_path = f"{nfs_lock_mount}/sample_file"
+        clients[0].exec_command(cmd=f"rm -f {file_path}", sudo=True, check_ec=False)
         clients[0].exec_command(cmd=f"touch {file_path}", sudo=True)
 
         # Perform File Lock from client 1
@@ -123,8 +146,10 @@ def run(ceph_cluster, **kw):
         c1.join()
 
         if rc == 0:
+            # Allow Ganesha to propagate lock release before client 2 retries
+            sleep(5)
             try:
-                get_file_lock(clients[1])
+                try_acquire_file_lock(clients[1], file_path)
                 log.info(
                     "Expected: Successfully acquired lock from client 2 while client 1 lock is released"
                 )

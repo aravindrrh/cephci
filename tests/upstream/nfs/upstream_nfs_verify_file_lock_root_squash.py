@@ -40,14 +40,33 @@ def rootsquash_using_conf(
         raise OperationFailedError("failed to enable rootsquash using conf file")
 
 
-def get_file_lock(client):
+def get_file_lock(client, file_path="/mnt/nfs_squash/sample_file", hold_seconds=30):
     """
     Gets the file lock on the file with root_squash enabled
     Args:
         client (ceph): Ceph client node
+        file_path (str): Path to the file to lock
+        hold_seconds (int): How long to hold the lock before releasing
     """
-    cmd = """python3 -c 'from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN;from time import sleep;f = open(
-"/mnt/nfs_squash/sample_file", "w");flock(f.fileno(), LOCK_EX | LOCK_NB);sleep(30);flock(f.fileno(), LOCK_UN)'"""
+    cmd = (
+        "python3 -c 'from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN;"
+        "from time import sleep;"
+        f'f = open("{file_path}", "w");'
+        "flock(f.fileno(), LOCK_EX | LOCK_NB);"
+        f"sleep({hold_seconds});"
+        "flock(f.fileno(), LOCK_UN)'"
+    )
+    client.exec_command(cmd=cmd, sudo=True)
+
+
+def try_acquire_file_lock(client, file_path="/mnt/nfs_squash/sample_file"):
+    """Acquire and immediately release a lock; used after client 1 has released."""
+    cmd = (
+        "python3 -c 'from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN;"
+        f'f = open("{file_path}", "w");'
+        "flock(f.fileno(), LOCK_EX | LOCK_NB);"
+        "flock(f.fileno(), LOCK_UN)'"
+    )
     client.exec_command(cmd=cmd, sudo=True)
 
 
@@ -106,6 +125,12 @@ def run(ceph_cluster, **kw):
             fs=fs_name,
             installer=installer
         )
+
+        # Enable NLM before mounting — ganesha restart after mount leaves stale handles.
+        if version == 3:
+            enable_v3_locking(installer)
+            sleep(5)
+
         # Mount the volume with rootsquash enable on client 1 and 2
         for client in clients[:2]:
             client.create_dirs(dir_path=nfs_squash_mount, sudo=True)
@@ -124,10 +149,6 @@ def run(ceph_cluster, **kw):
             client.exec_command(sudo=True, cmd=f"chmod 777 {nfs_squash_mount}/")
         log.info("Mount succeeded on client")
 
-        # Check the mount protocol
-        if version == 3:
-            enable_v3_locking(installer)
-
         # Enable rootsquash using conf file
         rootsquash_using_conf(
             clients[1],
@@ -143,53 +164,56 @@ def run(ceph_cluster, **kw):
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
         return 1
 
+    file_path = f"{nfs_squash_mount}/sample_file"
+    rc = 1
     try:
-        # Check the mount protocol and enable locking for v3
-        if version == 3:
-            enable_v3_locking(installer)
-
-        # Create file on squashed dir
+        # Create file on squashed dir (drop stale file/locks from prior runs)
         clients[0].exec_command(
             sudo=True,
-            cmd=f"touch {nfs_squash_mount}/sample_file",
+            cmd=f"rm -f {file_path}",
+            check_ec=False,
         )
+        clients[0].exec_command(
+            sudo=True,
+            cmd=f"touch {file_path}",
+        )
+
+        # Perform File Lock from client 1
+        c1 = Thread(target=get_file_lock, args=(clients[0],))
+        c1.start()
+
+        # Adding a constant sleep as it is required for the thread call to start the lock process
+        sleep(2)
+        rc = 0
+        try:
+            get_file_lock(clients[1])
+            log.error(
+                "Unexpected: Client 2 was able to access file lock while client 1 lock was active"
+            )
+            rc = 1
+        except Exception as e:
+            log.info(
+                f"Expected: Failed to acquire lock from client 2 while client 1 lock is in on {e}"
+            )
+
+        c1.join()
+
+        if rc == 0:
+            # Allow Ganesha to propagate lock release before client 2 retries
+            sleep(5)
+            try:
+                try_acquire_file_lock(clients[1], file_path)
+                log.info(
+                    "Expected: Successfully acquired lock from client 2 while client 1 lock is released"
+                )
+            except Exception as e:
+                log.error(
+                    f"Unexpected: Failed to acquire lock from client 2 while client 1 lock is in removed {e}"
+                )
+                rc = 1
     except Exception as e:
-        log.error(f"Failed to create rootsquash dir. Error: {e}")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-        return 1
-
-    # Perform File Lock from client 1
-    c1 = Thread(target=get_file_lock, args=(clients[0],))
-    c1.start()
-
-    # Adding a constant sleep as it is required for the thread call to start the lock process
-    sleep(2)
-    try:
-        get_file_lock(clients[1])
-        log.error(
-            "Unexpected: Client 2 was able to access file lock while client 1 lock was active"
-        )
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-        return 1
-    except Exception as e:
-        log.info(
-            f"Expected: Failed to acquire lock from client 2 while client 1 lock is in on {e}"
-        )
-
-    c1.join()
-
-    try:
-        get_file_lock(clients[1])
-        log.info(
-            "Expected: Successfully acquired lock from client 2 while client 1 lock is released"
-        )
-    except Exception as e:
-        log.error(
-            f"Unexpected: Failed to acquire lock from client 2 while client 1 lock is in removed {e}"
-        )
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-        return 1
-
+        log.error(f"Failed file lock test on rootsquash export. Error: {e}")
+        rc = 1
     finally:
         log.info("Cleaning up")
         # Extra squash export/mount — remove only what this test created
@@ -200,4 +224,4 @@ def run(ceph_cluster, **kw):
         except Exception as exc:
             log.warning("file_lock_root_squash cleanup failed: %s", exc)
         log.info("Cleaning up successfull")
-    return 0
+    return rc

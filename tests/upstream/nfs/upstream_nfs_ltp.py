@@ -40,9 +40,12 @@ def run(ceph_cluster, **kw):
               "perl perl-Time-HiRes python3 wget tar libaio-devel net-tools nfs-utils"
         clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # clone LTP
-        cmd = "git clone https://github.com/linux-test-project/ltp.git"
-        cmd += " && git clone https://github.com/linux-test-project/kirk.git"
+        # clone LTP (remove stale trees from prior suite runs on the same node)
+        cmd = (
+            "rm -rf ltp kirk && "
+            "git clone https://github.com/linux-test-project/ltp.git && "
+            "git clone https://github.com/linux-test-project/kirk.git"
+        )
         clients[0].exec_command(cmd=cmd, sudo=True)
 
         # Build LTP

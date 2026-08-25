@@ -68,7 +68,10 @@ def run(ceph_cluster, **kw):
             client.exec_command(cmd="firewall-cmd --zone=public --list-ports", sudo=True)
 
             log.info(">>> Cloning nfstest repo...")
-            client.exec_command(cmd=f"git clone {nfstest_repo} {nfstest_dir}", sudo=True)
+            client.exec_command(
+                cmd=f"rm -rf {nfstest_dir} && git clone {nfstest_repo} {nfstest_dir}",
+                sudo=True,
+            )
 
             log.info(">>> Configuring PYTHONPATH...")
             bashrc_path = "~/.bashrc"
