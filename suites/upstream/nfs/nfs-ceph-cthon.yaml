@@ -107,6 +107,7 @@ tests:
       config:
         nfs_version: 4.2
         clients: 1
+        iterations: 50
 
   - test:
       name: Cleanup Upstream NFS and Ceph

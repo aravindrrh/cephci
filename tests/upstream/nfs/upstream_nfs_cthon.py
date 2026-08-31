@@ -1,5 +1,6 @@
 from upstream_nfs_operations import cleanup_cluster, setup_nfs_cluster, wipe_export_contents
 
+from cli.exceptions import ConfigError
 from utility.log import Log
 
 log = Log(__name__)
@@ -11,6 +12,7 @@ def run(ceph_cluster, **kw):
     clients = ceph_cluster.get_nodes("client")
     port = config.get("port", "2049")
     version = config.get("nfs_version", "4.0")
+    iterations = int(config.get("iterations", 1))
     nfs_nodes = ceph_cluster.get_nodes("installer")
     nfs_node = nfs_nodes[0]
     fs_name = "cephfs"
@@ -21,7 +23,11 @@ def run(ceph_cluster, **kw):
     # Extra mount used for NFSv4.1 cthon pass
     nfs_mount_v41 = "/mnt/nfsv4_1"
 
+    if iterations < 1:
+        raise ConfigError("iterations must be >= 1")
+
     log.info("Setup nfs cluster")
+    rc = 0
     try:
         setup_nfs_cluster(
             clients,
@@ -43,13 +49,12 @@ def run(ceph_cluster, **kw):
         clients[0].exec_command(cmd=cmd, sudo=True)
 
         # clone Cthon
-        cmd = "git clone --depth=1 git://git.linux-nfs.org/projects/steved/cthon04.git;cd cthon04;make all"
+        cmd = (
+            "rm -rf cthon04 && "
+            "git clone --depth=1 git://git.linux-nfs.org/projects/steved/cthon04.git;"
+            "cd cthon04;make all"
+        )
         clients[0].exec_command(cmd=cmd, sudo=True)
-
-        # Run Cthon test
-        cmd = f"cd cthon04;./server -a -p {nfs_export}_1 -m {nfs_mount} {nfs_node.ip_address}"
-        out, _ = clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
-        log.info(out)
 
         cmds = [
             f"mkdir -p {nfs_mount_v41}",
@@ -58,16 +63,25 @@ def run(ceph_cluster, **kw):
         for cmd in cmds:
             clients[0].exec_command(cmd=cmd, sudo=True)
 
-        # Run Cthon test v4.1
-        cmd = (
-            f"cd cthon04;./server -a -p {nfs_export}_1 -m {nfs_mount_v41} "
-            f"{nfs_node.ip_address}"
-        )
-        out, _ = clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
-        log.info(out)
+        for iteration in range(1, iterations + 1):
+            log.info(">>> Cthon iteration %s/%s", iteration, iterations)
+
+            cmd = (
+                f"cd cthon04;./server -a -p {nfs_export}_1 -m {nfs_mount} "
+                f"{nfs_node.ip_address}"
+            )
+            out, _ = clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
+            log.info(out)
+
+            cmd = (
+                f"cd cthon04;./server -a -p {nfs_export}_1 -m {nfs_mount_v41} "
+                f"{nfs_node.ip_address}"
+            )
+            out, _ = clients[0].exec_command(cmd=cmd, sudo=True, timeout=10400)
+            log.info(out)
     except Exception as e:
         log.error(f"Error : {e}")
-        return 1
+        rc = 1
     finally:
         # Wipe files + umount extras; leave static /export_N alone
         try:
@@ -89,4 +103,4 @@ def run(ceph_cluster, **kw):
             cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
         except Exception as exc:
             log.warning("cthon cleanup_cluster failed: %s", exc)
-    return 0
+    return rc
