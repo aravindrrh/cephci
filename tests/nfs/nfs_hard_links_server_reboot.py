@@ -1,6 +1,7 @@
 from time import sleep
 
 from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from scripts_tools.restart_nfs_ganesha_services import wait_for_nfs_instances_healthy
 
 from cli.exceptions import ConfigError, OperationFailedError
 from cli.utilities.utils import reboot_node
@@ -62,6 +63,9 @@ def run(ceph_cluster, **kw):
 
         # Reboot NFS server
         reboot_node(nfs_node)
+
+        # Wait for NFS daemon to be up and running (1/1 in ceph orch ls)
+        wait_for_nfs_instances_healthy(clients[0], [nfs_name], timeout=900, interval=30)
 
         # After reboot, Verify hardlink
         original_file_inode = (
