@@ -20,6 +20,7 @@ log = Log(__name__)
 def run(ceph_cluster, **kw):
     """TC-S4 — different maps must not bypass chmod 600 restrictions."""
     plain_mount = idmap_a = idmap_b = None
+    clients = []
     try:
         _config, _test_data, build, clients, helper = init_idmap_test(ceph_cluster, kw)
         helper.prepare_clients(clients, build)

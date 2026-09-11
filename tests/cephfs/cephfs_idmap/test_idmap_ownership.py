@@ -23,6 +23,7 @@ log = Log(__name__)
 def run(ceph_cluster, **kw):
     """TC-S3 — verify UID/GID translation on create."""
     plain_mount = idmap_mount = None
+    clients = []
     try:
         _config, _test_data, build, clients, helper = init_idmap_test(ceph_cluster, kw)
         helper.prepare_clients(clients, build)

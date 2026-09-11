@@ -16,6 +16,7 @@ log = Log(__name__)
 def run(ceph_cluster, **kw):
     """TC-S11 — non-existent fs name produces filesystem-not-found error."""
     bad_mount = None
+    clients = []
     try:
         _config, _test_data, build, clients, helper = init_idmap_test(ceph_cluster, kw)
         helper.prepare_clients(clients, build)

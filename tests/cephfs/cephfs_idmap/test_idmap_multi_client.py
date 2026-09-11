@@ -18,6 +18,7 @@ log = Log(__name__)
 def run(ceph_cluster, **kw):
     """TC-S6 — shared files across two clients with the same idmap."""
     mounts = []
+    clients = []
     try:
         _config, _test_data, build, clients, helper = init_idmap_test(ceph_cluster, kw)
         if len(clients) < 2:
@@ -34,6 +35,7 @@ def run(ceph_cluster, **kw):
             plain = f"/mnt/cephfs_idmap_plain_{suffix}"
             idmap = f"/mnt/cephfs_idmap_view_{suffix}"
             helper.kernel_mount_plain(client, plain)
+            helper.prepare_idmap_mount_root(client, plain)
             helper.idmap_bind_mount(client, plain, idmap)
             helper.exec_cmd(client, f"mkdir -p {idmap}/{shared}")
             mounts.append((client, plain, idmap))
