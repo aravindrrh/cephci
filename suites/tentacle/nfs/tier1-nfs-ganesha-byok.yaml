@@ -186,6 +186,7 @@ tests:
             nfs_mount: /mnt/nfs_byok
             nfs_export: /export_byok
             nfs_instance_name: nfs_byok
+            byok_debug: true
 
      - test:
          name: byok multicluster with io and restart - parallel module

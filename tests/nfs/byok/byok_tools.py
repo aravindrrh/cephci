@@ -19,6 +19,7 @@ from tests.nfs.nfs_operations import (
     create_multiple_nfs_instance_via_spec_file,
     create_nfs_via_file_and_verify,
     fuse_mount_retry,
+    get_ganesha_info_from_container,
     log,
 )
 from tests.nfs.test_nfs_multiple_operations_for_upgrade import (
@@ -45,6 +46,8 @@ _GKLM_WAS_HOME_DEFAULT = "/opt/IBM/WebSphere/Liberty"
 _GKLM_LOG_TAIL_LINES = 250
 _GKLM_SECRET_KEYS = ("gklm_password", "gklm_node_password", "password")
 _KMIP_SECRET_SPEC_KEYS = ("kmip_key",)
+_BYOK_DEBUG_PREFIX = "[BYOK_DEBUG]"
+_DEFAULT_KMIP_PORT = 5696
 
 
 def _redact_secrets_for_log(obj):
@@ -143,7 +146,10 @@ def collect_gklm_logs_on_failure(gklm_params, tail_lines=_GKLM_LOG_TAIL_LINES):
         '  if [ -f "$f" ]; then '
         '    echo ""; echo "===== tail -n $N $f ====="; tail -n "$N" "$f"; '
         "  fi; "
-        "done"
+        "done; "
+        'echo ""; echo "=== KMIP port listen check (5696) ==="; '
+        "(ss -lntp 2>/dev/null || netstat -lntp 2>/dev/null) | grep 5696 || "
+        'echo "(no listener on 5696 or ss/netstat unavailable)"'
     )
 
     remote = None
@@ -176,6 +182,214 @@ def collect_gklm_logs_on_failure(gklm_params, tail_lines=_GKLM_LOG_TAIL_LINES):
                 remote._client.close()
             except Exception:
                 pass
+
+
+def _byok_debug_line(phase, section, message):
+    log.info("%s phase=%s section=%s %s", _BYOK_DEBUG_PREFIX, phase, section, message)
+
+
+def _node_exec(node, cmd, sudo=True):
+    if node is None:
+        return "", "no node"
+    try:
+        out, err = node.exec_command(cmd=cmd, sudo=sudo, check_ec=False)
+        return (out or "").strip(), (err or "").strip()
+    except Exception as ex:
+        return "", str(ex)
+
+
+def log_byok_debug_snapshot(
+    phase,
+    *,
+    gklm_rest_client=None,
+    gklm_client_name=None,
+    enctag=None,
+    gklm_hostname=None,
+    gklm_ip=None,
+    kmip_port=None,
+    gklm_params=None,
+    nfs_node=None,
+    installer=None,
+    ceph_node=None,
+    nfs_name=None,
+    export_path=None,
+    wait_export_visible=False,
+):
+    """
+    Non-fatal BYOK/KMIP diagnostics for manual triage. Grep test logs for ``[BYOK_DEBUG]``.
+    """
+    kmip_port = int(kmip_port or _DEFAULT_KMIP_PORT)
+    log.info("%s ===== snapshot start phase=%s =====", _BYOK_DEBUG_PREFIX, phase)
+
+    if gklm_rest_client is not None:
+        try:
+            health = gklm_rest_client.server.health_check()
+            _byok_debug_line(phase, "gklm_rest_health", health)
+        except Exception as ex:
+            _byok_debug_line(phase, "gklm_rest_health", f"FAILED: {ex}")
+        if gklm_client_name:
+            try:
+                clients = gklm_rest_client.clients.list_clients() or []
+                names = [c.get("clientName") for c in clients]
+                _byok_debug_line(phase, "gklm_clients", names)
+            except Exception as ex:
+                _byok_debug_line(phase, "gklm_clients", f"FAILED: {ex}")
+            try:
+                objects = gklm_rest_client.objects.list_client_objects(gklm_client_name)
+                summary = [
+                    {
+                        "uuid": o.get("uuid") or o.get("id"),
+                        "name": o.get("name") or o.get("alias"),
+                    }
+                    for o in (objects or [])
+                ]
+                _byok_debug_line(phase, "gklm_client_objects", summary)
+                if enctag and summary:
+                    ids = {str(x.get("uuid")) for x in summary if x.get("uuid")}
+                    _byok_debug_line(
+                        phase,
+                        "enctag_in_gklm",
+                        enctag in ids or enctag in str(summary),
+                    )
+            except Exception as ex:
+                _byok_debug_line(phase, "gklm_client_objects", f"FAILED: {ex}")
+
+    if gklm_params:
+        host = gklm_params.get("gklm_ip") or gklm_ip
+        username = gklm_params.get("gklm_node_username") or gklm_params.get(
+            "gklm_node_user"
+        )
+        password = gklm_params.get("gklm_node_password")
+        if host and username and password:
+            probe = (
+                f"echo '=== getent hosts {shlex.quote(gklm_hostname or host)} ==='; "
+                f"getent hosts {shlex.quote(gklm_hostname or host)} 2>&1; "
+                f"echo '=== KMIP listen {kmip_port} ==='; "
+                f"(ss -lntp 2>/dev/null || netstat -lntp 2>/dev/null) | grep {kmip_port} "
+                "|| echo 'no listener'; "
+            )
+            remote = None
+            try:
+                remote = Remote(host=host, username=username, password=password)
+                stdout, stderr = remote.run(cmd=probe, timeout=60)
+                _byok_debug_line(
+                    phase,
+                    "gklm_host_probe",
+                    (stdout or "(empty)") + (f" stderr={stderr}" if stderr else ""),
+                )
+            except Exception as ex:
+                _byok_debug_line(phase, "gklm_host_probe", f"FAILED: {ex}")
+            finally:
+                if remote is not None:
+                    try:
+                        remote._client.close()
+                    except Exception:
+                        pass
+
+    if nfs_node and (gklm_hostname or gklm_ip):
+        host = gklm_hostname or gklm_ip
+        out, err = _node_exec(
+            nfs_node,
+            f"getent hosts {shlex.quote(host)}; "
+            f"timeout 5 bash -c 'echo >/dev/tcp/{shlex.quote(gklm_ip or host)}/{kmip_port}' "
+            f"&& echo KMIP_TCP_OK || echo KMIP_TCP_FAIL",
+        )
+        _byok_debug_line(phase, "nfs_node_dns_kmip_tcp", f"out={out!r} err={err!r}")
+
+    if ceph_node and nfs_name:
+        service = nfs_name if str(nfs_name).startswith("nfs.") else f"nfs.{nfs_name}"
+        raw, err = _node_exec(
+            ceph_node, f"ceph orch get {service} --format json", sudo=True
+        )
+        if raw:
+            try:
+                spec_doc = json.loads(raw)
+                redacted = _redact_secrets_for_log(spec_doc)
+                _byok_debug_line(phase, "orch_nfs_spec", json.dumps(redacted)[:8000])
+            except json.JSONDecodeError:
+                _byok_debug_line(phase, "orch_nfs_spec", raw[:4000])
+        else:
+            _byok_debug_line(phase, "orch_nfs_spec", f"empty/err={err!r}")
+
+    if installer and nfs_node and nfs_name:
+        try:
+            _, container_info = get_ganesha_info_from_container(
+                installer, nfs_name, nfs_node
+            )
+            _byok_debug_line(phase, "ganesha_container", container_info)
+            cid = (container_info or {}).get("container_id")
+            if cid:
+                kmip_ls, _ = _node_exec(
+                    nfs_node,
+                    f"podman exec {shlex.quote(cid)} "
+                    "ls -la /etc/ganesha/kmip/ 2>&1",
+                )
+                _byok_debug_line(phase, "ganesha_kmip_files", kmip_ls)
+                kmip_target = gklm_ip or gklm_hostname or ""
+                in_container_dns, _ = _node_exec(
+                    nfs_node,
+                    f"podman exec {shlex.quote(cid)} getent hosts "
+                    f"{shlex.quote(gklm_hostname or kmip_target)} 2>&1",
+                )
+                _byok_debug_line(
+                    phase, "ganesha_container_gklm_dns", in_container_dns or "(none)"
+                )
+                kmip_from_container, _ = _node_exec(
+                    nfs_node,
+                    f"podman exec {shlex.quote(cid)} bash -c "
+                    f"'(timeout 5 bash -c \"echo >/dev/tcp/{kmip_target}/{kmip_port}\" "
+                    "&& echo KMIP_TCP_FROM_CONTAINER_OK) || echo KMIP_TCP_FROM_CONTAINER_FAIL' "
+                    "2>&1",
+                )
+                _byok_debug_line(
+                    phase, "ganesha_container_kmip_tcp", kmip_from_container
+                )
+                ganesha_tail, _ = _node_exec(
+                    nfs_node,
+                    f"podman exec {shlex.quote(cid)} bash -c "
+                    "'for f in /var/log/ganesha.log /var/log/ceph/ganesha.log; do "
+                    "[ -f \"$f\" ] && tail -n 120 \"$f\" && break; done' 2>/dev/null "
+                    "| grep -iE 'kmip|export|ENOENT|fscrypt|error|fail' | tail -n 40 || true",
+                )
+                _byok_debug_line(phase, "ganesha_log_filtered", ganesha_tail or "(none)")
+        except Exception as ex:
+            _byok_debug_line(phase, "ganesha_container", f"FAILED: {ex}")
+
+    if ceph_node and nfs_name:
+        ls_out, ls_err = _node_exec(
+            ceph_node,
+            f"ceph nfs export ls {nfs_name} --format json",
+            sudo=True,
+        )
+        _byok_debug_line(phase, "nfs_export_ls", f"{ls_out[:4000]!r} err={ls_err!r}")
+        if export_path:
+            get_out, get_err = _node_exec(
+                ceph_node,
+                f"ceph nfs export get {nfs_name} {export_path}",
+                sudo=True,
+            )
+            _byok_debug_line(
+                phase,
+                "nfs_export_get",
+                f"{get_out[:4000]!r} err={get_err!r}",
+            )
+            if wait_export_visible:
+                try:
+                    from tests.nfs.security.security_utils import (
+                        wait_until_nfs_export_visible,
+                    )
+
+                    visible = wait_until_nfs_export_visible(
+                        ceph_node, nfs_name, export_path, timeout=120, interval=3
+                    )
+                    _byok_debug_line(phase, "export_visible", visible)
+                except Exception as ex:
+                    _byok_debug_line(phase, "export_visible", f"FAILED: {ex}")
+
+    if enctag:
+        _byok_debug_line(phase, "enctag", enctag)
+
+    log.info("%s ===== snapshot end phase=%s =====", _BYOK_DEBUG_PREFIX, phase)
 
 
 def is_gklm_auth_error(exc) -> bool:

@@ -13,6 +13,7 @@ from tests.nfs.byok.byok_tools import (
     get_enctag,
     gklm_api_call,
     load_gklm_config,
+    log_byok_debug_snapshot,
     perform_io_operations_and_validate_fuse,
     setup_gklm_infrastructure,
     wait_for_gklm_server_restart,
@@ -237,6 +238,28 @@ def run(ceph_cluster, **kw):
     client_export_mount_dict = None
     spec = config.get("spec")
     test_failed = True
+    byok_debug = bool(config.get("byok_debug", False))
+    kmip_port = config.get("kmip_port")
+    installer_node = installer[0] if isinstance(installer, list) else installer
+    enctag = None
+    gklm_rest_client = None
+
+    def _byok_debug_kwargs(**extra):
+        ctx = {
+            "gklm_rest_client": gklm_rest_client,
+            "gklm_client_name": gkml_client_name,
+            "enctag": enctag,
+            "gklm_hostname": gklm_hostname,
+            "gklm_ip": gklm_ip,
+            "kmip_port": kmip_port,
+            "gklm_params": gklm_params,
+            "nfs_node": nfs_node,
+            "installer": installer_node,
+            "ceph_node": clients[0],
+            "nfs_name": nfs_name,
+        }
+        ctx.update(extra)
+        return ctx
 
     try:
         log.info("Step 1: Setting up GKLM infrastructure")
@@ -359,6 +382,8 @@ def run(ceph_cluster, **kw):
             gklm_user,
             cert,
         )
+        if byok_debug and nfs_replication_number == 1:
+            log_byok_debug_snapshot("post-enctag", **_byok_debug_kwargs())
 
         log.info("Step 4: Configuring CephFS subvolume group for NFS")
         Ceph(clients[0]).fs.sub_volume_group.create(
@@ -381,8 +406,17 @@ def run(ceph_cluster, **kw):
                 cert=cert,
                 ca_cert=ca_cert,
             )
+            if byok_debug:
+                log_byok_debug_snapshot("post-nfs-deploy", **_byok_debug_kwargs())
 
             log.info("Step 6: Creating and mounting NFS exports")
+            mount_kwargs = {
+                "enctag": enctag,
+                "nfs_server": nfs_node.hostname,
+            }
+            if byok_debug:
+                mount_kwargs["byok_debug"] = True
+                mount_kwargs["byok_debug_ctx"] = _byok_debug_kwargs()
             client_export_mount_dict = create_export_and_mount_for_existing_nfs_cluster(
                 clients,
                 nfs_export,
@@ -393,8 +427,7 @@ def run(ceph_cluster, **kw):
                 fs_name,
                 port,
                 version=config.get("nfs_version", "4.0"),
-                enctag=enctag,
-                nfs_server=nfs_node.hostname,
+                **mount_kwargs,
             )
 
             if config.get("check_sighup", False):
@@ -500,6 +533,14 @@ def run(ceph_cluster, **kw):
     finally:
         log.info("Cleanup: GKLM, NFS clusters, and mounts")
         if test_failed:
+            if byok_debug and nfs_replication_number == 1:
+                log_byok_debug_snapshot(
+                    "on-failure",
+                    **_byok_debug_kwargs(
+                        export_path=f"{nfs_export}_0",
+                        wait_export_visible=False,
+                    ),
+                )
             collect_gklm_logs_on_failure(gklm_params)
         if config.get("check_sighup", False):
             try:

@@ -80,6 +80,8 @@ def create_export_and_mount_for_existing_nfs_cluster(
             keys in ``MOUNT_OPTS_KEYS`` (see export_mount_kwargs) are forwarded.
     """
     upgrade_kwargs = pop_upgrade_kwargs(kwargs)
+    byok_debug = kwargs.pop("byok_debug", False)
+    byok_debug_ctx = kwargs.pop("byok_debug_ctx", None) or {}
     installer_node = upgrade_kwargs["installer_node"]
     during_upgrade = upgrade_kwargs["during_upgrade"]
     nfs_wait_timeout = upgrade_kwargs["nfs_wait_timeout"]
@@ -245,6 +247,15 @@ def create_export_and_mount_for_existing_nfs_cluster(
             else:
                 Ceph(clients[client_num]).nfs.export.create(
                     fs_name=fs_name, nfs_name=nfs_name, nfs_export=export_name, fs=fs
+                )
+            if byok_debug:
+                from tests.nfs.byok.byok_tools import log_byok_debug_snapshot
+
+                log_byok_debug_snapshot(
+                    "post-export-pre-mount",
+                    export_path=export_name,
+                    wait_export_visible=True,
+                    **byok_debug_ctx,
                 )
             sleep(1)
             mount_versions = _get_client_specific_mount_versions(version, clients)
