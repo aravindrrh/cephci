@@ -3,7 +3,7 @@
 # S-*, F-*, A-*, R-*, X-*, SC-*, N-* (HA-* remains baremetal/tier1-nfs-prometheus-stats-ha.yaml)
 # Conf: conf/tentacle/nfs/1admin-7node-3client.yaml
 # Backend: Ceph FSAL only (GPFS cases excluded)
-# Requires 2 clients (S-07, F-09). Accuracy/scale use 4 clients (node4–node7).
+# Requires 2 clients (S-07, F-09). Accuracy/scale use 4 clients (node8–node11).
 # Run with cluster reuse or uncomment bootstrap below.
 #===============================================================================================
 tests:
@@ -63,7 +63,7 @@ tests:
       config:
         command: add
         id: client.1
-        node: node4
+        node: node8
         install_packages:
           - ceph-common
           - ceph-fuse
@@ -79,7 +79,7 @@ tests:
       config:
         command: add
         id: client.2
-        node: node5
+        node: node9
         install_packages:
           - ceph-common
           - ceph-fuse
@@ -95,7 +95,7 @@ tests:
       config:
         command: add
         id: client.3
-        node: node6
+        node: node10
         install_packages:
           - ceph-common
           - ceph-fuse
@@ -111,7 +111,7 @@ tests:
       config:
         command: add
         id: client.4
-        node: node7
+        node: node11
         install_packages:
           - ceph-common
           - ceph-fuse
