@@ -190,6 +190,22 @@ tests:
         clients: 2
         nfs_export: /ibm/scale_volume/export1
 
+  - test:
+      name: ganesha_mgr Tier1 functional
+      module: test_ganesha_mgr_tier1.py
+      desc: Tier-1 ganesha_mgr coverage on Scale CES NFS (exports/clients/cache/logs/condlog/grace/trim)
+      abort-on-fail: false
+      timeout: 7200
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_version: "4.1"
+        mount_point: /mnt/nfs
+        nfs_export: /ibm/scale_volume/export1
+        port: "2049"
+        enable_dbus_export_mutate: true
+        enable_shutdown: false
+
   # ACL modules assume Scale+Ganesha+export1 already up (no acl_deploy).
   # Placed late so Ganesha restart inside functional has less impact on tools.
   - test:
