@@ -50,7 +50,10 @@ GANESHA_BASE_PACKAGES = (
     "rpm-build redhat-rpm-config gdb libblkid-devel libcap-devel "
     "libgfapi-devel xfsprogs-devel libnsl2-devel libnfsidmap-devel "
     "libwbclient-devel userspace-rcu-devel libcephfs-devel "
-    "selinux-policy-devel sqlite unzip"
+    "selinux-policy-devel sqlite unzip "
+    # USE_ADMIN_TOOLS packages ganesha_mgr / ganeshactl (needs Python 3).
+    # rpmbuild Requires: python3-devel when admin tools are enabled.
+    "python3 python3-devel python3-setuptools"
 )
 
 
@@ -329,9 +332,11 @@ def build_install_ganesha(ceph_cluster, config=None):
     # Same recipe as ci-tests basic-storage-scale.sh (no tarball rewrite —
     # overlaying src/ into the CPack tarball adds a second .spec and breaks
     # rpmbuild -ta with "Found more than one spec file").
+    # USE_ADMIN_TOOLS=ON packages ganesha_mgr (defaults OFF upstream).
     build_script = (
         f"cd {clone_dir} && mkdir -p build && cd build && "
         "cmake -DCMAKE_BUILD_TYPE=Maintainer -DUSE_FSAL_GPFS=ON -DUSE_DBUS=ON "
+        "-DUSE_ADMIN_TOOLS=ON "
         "-D_MSPAC_SUPPORT=OFF -DMONITORING=ON -DUSE_MONITORING=ON ../src && "
         "make dist && "
         "tar xOf nfs-ganesha-*.tar.gz --wildcards '*/os/linux/subr.c' "
@@ -371,6 +376,20 @@ def build_install_ganesha(ceph_cluster, config=None):
     )
     log.info("Verifying Scale ACL fix is present in installed libganesha_nfsd.so")
     _run(node, f"bash -lc {shlex.quote(verify_script)}", timeout=60)
+
+    # Binary presence only — do not run `ganesha_mgr help` here: that talks
+    # D-Bus and fails before nfs-ganesha is started (below).
+    mgr_verify = (
+        "mgr=$(command -v ganesha_mgr 2>/dev/null || true); "
+        '[ -z "$mgr" ] && [ -x /usr/bin/ganesha_mgr ] && mgr=/usr/bin/ganesha_mgr; '
+        '[ -n "$mgr" ] && [ -x "$mgr" ] || { '
+        'echo "ERROR: ganesha_mgr not installed '
+        '(need -DUSE_ADMIN_TOOLS=ON)" >&2; '
+        "rpm -qa | grep -i ganesha || true; exit 1; }; "
+        'echo "Found ganesha_mgr at $mgr"'
+    )
+    log.info("Verifying ganesha_mgr is installed")
+    _run(node, f"bash -lc {shlex.quote(mgr_verify)}", timeout=60)
 
     _run(
         node,
