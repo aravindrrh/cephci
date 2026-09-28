@@ -606,6 +606,10 @@ GANESHA_SYSTEMD_UNITS = (
 GANESHA_CONFIG_DIRS = (
     "/etc/ganesha",
 )
+# Runtime state left by ganesha.nfsd (recovery / v4 state, etc.).
+GANESHA_STATE_DIRS = (
+    "/var/lib/nfs/ganesha",
+)
 GANESHA_LOG_PATHS = (
     "/var/log/ganesha.log",
     "/var/log/ganesha/ganesha.log",
@@ -704,6 +708,7 @@ def _purge_nfs_ganesha_artifacts(node, timeout=600):
     """
     units = " ".join(GANESHA_SYSTEMD_UNITS)
     configs = " ".join(GANESHA_CONFIG_DIRS)
+    state_dirs = " ".join(GANESHA_STATE_DIRS)
     logs = " ".join(GANESHA_LOG_PATHS)
     script = f"""
 set +e
@@ -718,12 +723,15 @@ if [ -n "$pkgs" ]; then rpm -e --nodeps $pkgs; fi
 rm -rf {units}
 # Drop prior run config so next build starts clean
 rm -rf {configs}
+# Runtime state (recovery / NFSv4 state DB)
+rm -rf {state_dirs}
 # Logs from previous ganesha.nfsd
 rm -rf {logs}
 systemctl daemon-reload
 systemctl reset-failed nfs-ganesha 2>/dev/null
 echo "Remaining Ganesha RPMs: $(rpm -qa | grep -iE '{GANESHA_RPM_GREP}' || echo none)"
 ls /etc/ganesha 2>&1 || echo "/etc/ganesha gone"
+ls /var/lib/nfs/ganesha 2>&1 || echo "/var/lib/nfs/ganesha gone"
 ls /usr/lib/systemd/system/nfs-ganesha* 2>&1 || echo "no nfs-ganesha units left"
 """
     _best_effort(
