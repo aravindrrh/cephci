@@ -7,6 +7,7 @@ It contains all the re-useable functions related to cephfs mirroring feature
 import csv
 import json
 import random
+import re
 import secrets
 import string
 import time
@@ -21,6 +22,192 @@ from utility.retry import retry
 from utility.utils import get_ceph_version_from_cluster
 
 log = Log(__name__)
+
+
+def parse_sync_duration_to_seconds(raw_duration):
+    """Convert daemon sync_duration values to float seconds.
+
+    Accepts numeric values and human-readable strings such as ``49s``,
+    ``1m 16``, ``1m 16s``, ``1h 2m 3s``, or plain ``76.5``.
+    Returns None when the value is missing or unparseable.
+    Zero is a valid duration and is preserved.
+    """
+    if raw_duration is None:
+        return None
+    if isinstance(raw_duration, (int, float)):
+        return float(raw_duration)
+
+    text = str(raw_duration).strip().lower()
+    if not text:
+        return None
+
+    # Plain seconds: "49", "49s", "76.5", "76.5s"
+    plain = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*s?", text)
+    if plain:
+        return float(plain.group(1))
+
+    # Compound durations with at least one h/m unit, e.g. "1h 2m 3s", "1m 16".
+    compound = re.fullmatch(
+        r"(?:([0-9]+(?:\.[0-9]+)?)\s*h)?"
+        r"(?:\s*([0-9]+(?:\.[0-9]+)?)\s*m)?"
+        r"(?:\s*([0-9]+(?:\.[0-9]+)?)\s*s?)?",
+        text,
+    )
+    if not compound:
+        return None
+    hours, minutes, seconds = compound.groups()
+    if hours is None and minutes is None:
+        return None
+
+    total = 0.0
+    if hours is not None:
+        total += float(hours) * 3600
+    if minutes is not None:
+        total += float(minutes) * 60
+    if seconds is not None:
+        total += float(seconds)
+    return total
+
+
+def compare_and_validate_sync_durations(results):
+    """
+    Log a sync-duration comparison table and improvement vs 1-thread.
+
+    Multi-thread sync must be equal or faster than the 1-thread baseline
+    for the same mount type. Returns False if any multi-thread run is slower.
+
+    When the 1-thread baseline is missing or <= 0 (daemon may report 0s for
+    very short syncs), validation for that mount is skipped with a warning.
+    """
+
+    def _fmt(val, suffix=""):
+        return f"{val:.1f}{suffix}" if val is not None else "None"
+
+    durations = {}
+    thread_counts = sorted({r["thread_count"] for r in results})
+    mount_types = []
+    for r in results:
+        mtype = r["mount_type"]
+        if mtype not in durations:
+            durations[mtype] = {}
+            mount_types.append(mtype)
+        durations[mtype][r["thread_count"]] = r.get("sync_duration_sec")
+
+    log.info("=" * 70)
+    log.info("SYNC DURATION COMPARISON TABLE (seconds)")
+    log.info("=" * 70)
+    header = f"{'Mount':<10}" + "".join(f"{('t=' + str(t)):>14}" for t in thread_counts)
+    log.info(header)
+    log.info("-" * len(header))
+    for mtype in mount_types:
+        row = f"{mtype:<10}"
+        for t in thread_counts:
+            dur = durations[mtype].get(t)
+            row += f"{_fmt(dur):>14}"
+        log.info(row)
+
+    log.info("=" * 70)
+    log.info("SYNC DURATION IMPROVEMENT VS 1-THREAD")
+    log.info("Rule: multi-thread must be equal or faster than 1-thread")
+    log.info("=" * 70)
+
+    failed = False
+    for mtype in mount_types:
+        single = durations[mtype].get(1)
+        if single is None or single <= 0:
+            log.warning(
+                "No valid 1-thread baseline for mount=%s; skipping validation",
+                mtype,
+            )
+            continue
+
+        log.info("Mount=%s | 1-thread baseline: %.1fs", mtype, single)
+        prev_t = 1
+        prev_dur = single
+        for t in thread_counts:
+            if t == 1:
+                continue
+            multi = durations[mtype].get(t)
+            if multi is None:
+                log.error("Missing sync duration for mount=%s threads=%d", mtype, t)
+                failed = True
+                continue
+
+            saved_sec = single - multi
+            improve_pct = (saved_sec / single) * 100.0
+            vs_prev_sec = prev_dur - multi
+            vs_prev_pct = (vs_prev_sec / prev_dur) * 100.0 if prev_dur > 0 else 0.0
+
+            if multi > single:
+                log.error(
+                    "FAIL: mount=%s threads=%d duration=%.1fs is SLOWER than "
+                    "1-thread %.1fs (delta %+0.1fs / %+0.1f%%)",
+                    mtype,
+                    t,
+                    multi,
+                    single,
+                    multi - single,
+                    -improve_pct,
+                )
+                failed = True
+            elif multi == single:
+                log.info(
+                    "OK: mount=%s threads=%d duration=%.1fs EQUAL to 1-thread "
+                    "(no change)",
+                    mtype,
+                    t,
+                    multi,
+                )
+            else:
+                log.info(
+                    "OK: mount=%s threads=%d duration=%.1fs | improved by "
+                    "%.1fs (%.1f%%) vs 1-thread | vs t=%d: %+0.1fs (%+.1f%%)",
+                    mtype,
+                    t,
+                    multi,
+                    saved_sec,
+                    improve_pct,
+                    prev_t,
+                    vs_prev_sec,
+                    vs_prev_pct,
+                )
+            prev_t = t
+            prev_dur = multi
+
+    if failed:
+        log.error(
+            "Single vs multi-thread validation FAILED: "
+            "multi-thread sync duration must be equal or faster than 1-thread"
+        )
+        return False
+
+    log.info(
+        "Single vs multi-thread validation PASSED: "
+        "all multi-thread sync durations are equal or faster than 1-thread"
+    )
+    return True
+
+
+def _normalize_asok_peer_status(data):
+    """Normalize raw ``fs mirror peer status`` JSON to the legacy flat format.
+
+    Newer Ceph builds wrap the path metrics under ``{"metrics": {<path>: {"peer":
+    {"<uuid>": {<fields>}}}}}`` whereas older builds return the flat structure
+    ``{<path>: {"state": ..., "snaps_synced": ..., ...}}``.
+
+    This helper transparently converts both formats to the flat legacy shape so
+    that callers can always access ``result[path]["snaps_synced"]`` etc. directly.
+    """
+    if "metrics" in data:
+        data = data["metrics"]
+    normalized = {}
+    for path, path_data in data.items():
+        if isinstance(path_data, dict) and "peer" in path_data:
+            peer_uuid = next(iter(path_data["peer"]), None)
+            normalized[path] = path_data["peer"][peer_uuid] if peer_uuid else path_data
+        else:
+            normalized[path] = path_data
+    return normalized
 
 
 class CephfsMirroringUtils(object):
@@ -46,6 +233,16 @@ class CephfsMirroringUtils(object):
         self.target_ceph_cluster = target_ceph_cluster
         self.fs_util_ceph1 = FsUtils(source_ceph_cluster)
         self.fs_util_ceph2 = FsUtils(target_ceph_cluster)
+
+    @staticmethod
+    def skip_if_rhcs_below(config, min_version="9.2"):
+        """Return True when the RHCS rhbuild is older than min_version.
+
+        rhbuild is typically ``9.2-rhel-9``; the numeric prefix is compared.
+        """
+        config = config or {}
+        rhbuild = str(config.get("rhbuild") or config.get("build") or "0")
+        return LooseVersion(rhbuild.split("-")[0]) < LooseVersion(min_version)
 
     @staticmethod
     def verify_mount_points_responsive(client, mounting_dirs, timeout=30):
@@ -151,21 +348,62 @@ class CephfsMirroringUtils(object):
         Retries up to 20 times with fixed 15s delay (~5 min) until at least one
         cephfs-mirror container is confirmed running by podman on a mirror node.
 
+        If ceph_cluster is provided, queries ``ceph orch ps`` to discover the
+        actual daemon host (handles redeploy to a different node) and falls back
+        to the provided cephfs_mirror_nodes list.
+
         Args:
-            client: Client node (unused, kept for API compatibility)
+            client: Client node used to run ``ceph orch ps``
             cephfs_mirror_nodes: List of CephNode objects with the cephfs-mirror role
-            ceph_cluster: Ceph cluster object (unused, kept for API compatibility)
+            ceph_cluster: Ceph cluster object; used to resolve hostnames to node objects
 
         Raises:
             Exception: If no running container found on any node (triggers retry)
         """
-        if not cephfs_mirror_nodes:
-            raise Exception("No cephfs-mirror nodes provided")
+        nodes_to_check = []
 
+        if ceph_cluster:
+            try:
+                out, _ = client.exec_command(
+                    sudo=True,
+                    cmd="ceph orch ps --daemon_type=cephfs-mirror --format json",
+                    check_ec=False,
+                )
+                daemon_data = json.loads(out)
+                for daemon in daemon_data:
+                    host = daemon.get("hostname")
+                    if host:
+                        node = ceph_cluster.get_node_by_hostname(host)
+                        if node and node not in nodes_to_check:
+                            nodes_to_check.append(node)
+                if nodes_to_check:
+                    log.info(
+                        "Discovered cephfs-mirror daemon hosts via orch: %s",
+                        [n.hostname for n in nodes_to_check],
+                    )
+            except Exception as e:
+                log.warning(
+                    "Failed to discover daemon hosts via orch ps: %s, "
+                    "falling back to provided nodes",
+                    e,
+                )
+
+        if not nodes_to_check:
+            for ceph_obj in cephfs_mirror_nodes or []:
+                node = ceph_obj.node if hasattr(ceph_obj, "node") else ceph_obj
+                if node not in nodes_to_check:
+                    nodes_to_check.append(node)
+
+        if not nodes_to_check:
+            raise Exception("No cephfs-mirror nodes provided or discovered")
+
+        checked_hosts = set()
         failures = []
-        for ceph_obj in cephfs_mirror_nodes:
-            mirror_node = ceph_obj.node if hasattr(ceph_obj, "node") else ceph_obj
+        for mirror_node in nodes_to_check:
             hostname = mirror_node.hostname
+            if hostname in checked_hosts:
+                continue
+            checked_hosts.add(hostname)
             podman_out, _ = mirror_node.exec_command(
                 sudo=True,
                 cmd="podman ps --format '{{.Names}}' --filter name=cephfs-mirror",
@@ -643,9 +881,13 @@ class CephfsMirroringUtils(object):
         self, cephfs_mirror_node, fsid, daemon_names
     ):
         """
-        Fetch an accessible asok file by matching the daemon ID suffix
-        (e.g. 'zddvsp' from 'cephfs-mirror.mero006.zddvsp') to the asok
-        files on each node.
+        Fetch an accessible asok file for the cephfs-mirror daemon.
+
+        The function first resolves which node the daemon is *actually* running
+        on via ``ceph orch ps``, then falls back to the inventory-declared
+        nodes in ``cephfs_mirror_node``.  This avoids searching nodes that
+        carry the 'cephfs-mirror' inventory label but where the daemon is not
+        running (e.g. node5 in a cluster where the daemon lives on node6).
 
         Returns:
             dict: {hostname: [node, asok_file_path]}
@@ -653,28 +895,54 @@ class CephfsMirroringUtils(object):
         accessible_asok_files = {}
         daemon_ids = {n.rsplit(".", 1)[-1] for n in daemon_names if "." in n}
 
-        for node in cephfs_mirror_node:
-            node.exec_command(sudo=True, cmd="dnf install -y ceph-common --nogpgcheck")
+        # --- Resolve the node(s) where the daemon is actually running -------
+        # ceph orch ps tells us the real hostname; use that to pick the right
+        # node object instead of blindly iterating the inventory list.
+        actual_nodes = self._resolve_mirror_nodes(
+            self.source_clients[0], cephfs_mirror_node
+        )
+        log.info(
+            "Searching for asok on resolved mirror nodes: %s",
+            [
+                n.node.hostname if hasattr(n, "node") else n.hostname
+                for n in actual_nodes
+            ],
+        )
+
+        asok_dir = f"/var/run/ceph/{fsid}"
+        for node in actual_nodes:
+            try:
+                node.exec_command(
+                    sudo=True, cmd="dnf install -y ceph-common --nogpgcheck"
+                )
+            except CommandFailed as e:
+                log.warning(
+                    "dnf install ceph-common failed on %s (non-fatal): %s",
+                    getattr(getattr(node, "node", node), "hostname", node),
+                    e,
+                )
             file_output, _ = node.exec_command(
                 sudo=True,
-                cmd=f"ls -1tr /var/run/ceph/{fsid}/ceph-client.cephfs-mirror.* 2>/dev/null",
+                cmd=f"ls -1tr {asok_dir}/ceph-client.cephfs-mirror.* 2>/dev/null",
                 check_ec=False,
             )
-            asok_dir = f"/var/run/ceph/{fsid}"
             for asok_file_path in (
                 f.strip() for f in file_output.split("\n") if f.strip()
             ):
-                if not any(did in asok_file_path for did in daemon_ids):
+                if daemon_ids and not any(did in asok_file_path for did in daemon_ids):
                     continue
                 asok_basename = asok_file_path.rsplit("/", 1)[-1]
                 test_cmd = f"cd {asok_dir} && ceph --admin-daemon {asok_basename} help"
                 out, err = node.exec_command(sudo=True, cmd=test_cmd, check_ec=False)
                 if out and "fs mirror peer status" in out:
-                    accessible_asok_files[node.node.hostname] = [node, asok_file_path]
-                    log.info(f"Connected to asok: {asok_file_path}")
+                    hostname = getattr(
+                        getattr(node, "node", node), "hostname", str(node)
+                    )
+                    accessible_asok_files[hostname] = [node, asok_file_path]
+                    log.info("Connected to asok: %s on %s", asok_file_path, hostname)
                     break
                 else:
-                    log.warning(f"Cannot reach asok {asok_file_path}: {err}")
+                    log.warning("Cannot reach asok %s: %s", asok_file_path, err)
 
         if not accessible_asok_files:
             log.warning("No accessible asok files found")
@@ -855,7 +1123,7 @@ class CephfsMirroringUtils(object):
             f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
         )
         out, _ = cephfs_mirror_node.exec_command(sudo=True, cmd=cmd)
-        data = json.loads(out)
+        data = _normalize_asok_peer_status(json.loads(out))
         for path, status in data.items():
             last_synced_snap = status.get("last_synced_snap")
             if last_synced_snap:
@@ -864,7 +1132,7 @@ class CephfsMirroringUtils(object):
         log.error("last synced Snapshot not found or not synced")
         raise CommandFailed("last synced Snapshot not found or not synced")
 
-    @retry(CommandFailed, tries=10, delay=30, backoff=1)
+    @retry(CommandFailed, tries=30, delay=30, backoff=1)
     def validate_snapshot_sync_status(
         self,
         cephfs_mirror_node,
@@ -904,22 +1172,18 @@ class CephfsMirroringUtils(object):
         )
         if not asok_files:
             raise CommandFailed("No accessible cephfs-mirror admin socket found")
-        log.info(f"Admin Socket file of cephfs-mirror daemon : {asok_files}")
-        if not asok_files:
-            raise CommandFailed(
-                "No valid admin socket files found for cephfs-mirror daemon"
-            )
+        log.info("Admin Socket file of cephfs-mirror daemon : %s", asok_files)
         filesystem_id = self.get_filesystem_id_by_name(self.source_clients[0], fs_name)
-        log.info(f"filesystem id of {fs_name} is : {filesystem_id}")
+        log.info("filesystem id of %s is : %s", fs_name, filesystem_id)
         peer_uuid = self.get_peer_uuid_by_name(self.source_clients[0], fs_name)
-        log.info(f"peer uuid of {fs_name} is : {peer_uuid}")
+        log.info("peer uuid of %s is : %s", fs_name, peer_uuid)
         for node, asok in asok_files.items():
             try:
                 asok[0].exec_command(
                     sudo=True, cmd="dnf install -y ceph-common --nogpgcheck"
                 )
             except CommandFailed as e:
-                log.warning(f"dnf install ceph-common failed (non-fatal): {e}")
+                log.warning("dnf install ceph-common failed (non-fatal): %s", e)
             asok_basename = asok[1].rsplit("/", 1)[-1]
             asok_dir = f"/var/run/ceph/{fsid}"
             cmd = (
@@ -927,23 +1191,45 @@ class CephfsMirroringUtils(object):
                 f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
             )
             out, _ = asok[0].exec_command(sudo=True, cmd=cmd)
-            data = json.loads(out)
-            for path, status in data.items():
-                last_synced_snap = status.get("last_synced_snap")
-                if last_synced_snap:
-                    if last_synced_snap.get("name") == snapshot_name:
-                        sync_duration = last_synced_snap.get("sync_duration")
-                        sync_time_stamp = last_synced_snap.get("sync_time_stamp")
-                        snaps_synced = status.get("snaps_synced")
-                        log.info("All snapshots are synced")
-                        return {
-                            "snapshot_name": snapshot_name,
-                            "sync_duration": sync_duration,
-                            "sync_time_stamp": sync_time_stamp,
-                            "snaps_synced": snaps_synced,
-                        }
-        log.info("snapshot status: %s", status.get("state"))
-        log.error("%s not synced, last synced data is %s", snapshot_name, data)
+            data = _normalize_asok_peer_status(json.loads(out))
+            for path, path_status in data.items():
+                last_synced_snap = path_status.get("last_synced_snap")
+                if not last_synced_snap:
+                    continue
+                if last_synced_snap.get("name") == snapshot_name:
+                    raw_duration = last_synced_snap.get("sync_duration")
+                    sync_duration = parse_sync_duration_to_seconds(raw_duration)
+                    if sync_duration is None:
+                        log.error(
+                            "Snapshot %s matched but sync_duration is "
+                            "missing/unparseable (raw=%r)",
+                            snapshot_name,
+                            raw_duration,
+                        )
+                        raise CommandFailed(
+                            "sync_duration missing/unparseable for %s (raw=%r)"
+                            % (snapshot_name, raw_duration)
+                        )
+                    log.info(
+                        "Snapshot %s synced: duration=%s (raw=%s), bytes=%s, files=%s",
+                        snapshot_name,
+                        sync_duration,
+                        raw_duration,
+                        last_synced_snap.get("sync_bytes"),
+                        last_synced_snap.get("sync_files"),
+                    )
+                    return {
+                        "snapshot_name": snapshot_name,
+                        "sync_duration": sync_duration,
+                        "sync_time_stamp": last_synced_snap.get("sync_time_stamp"),
+                        "snaps_synced": path_status.get("snaps_synced"),
+                    }
+
+        log.debug(
+            "%s not synced yet (still syncing or pending). peer_status=%s",
+            snapshot_name,
+            data,
+        )
         raise CommandFailed("One or more snapshots are not synced")
 
     def remove_snapshot_mirror_peer(self, source_clients, fs_name, peer_uuid):
@@ -1701,7 +1987,7 @@ class CephfsMirroringUtils(object):
                 cmd=f"cd {asok_dir} && ceph --admin-daemon {asok_basename} "
                 f"fs mirror status {fs_name}@{filesystem_id} -f json",
             )
-            fs_mirror_status = json.dump(out)
+            fs_mirror_status = json.loads(out)
             return fs_mirror_status
 
     def get_fs_mirror_peer_status_using_asok(
@@ -1744,13 +2030,16 @@ class CephfsMirroringUtils(object):
                 f"fs mirror peer status {fs_name}@{filesystem_id} {peer_uuid} -f json",
             )
             fs_mirror_status = json.loads(out)
-            return fs_mirror_status
+            log.info(f"fs_mirror_status: {fs_mirror_status}")
+            return _normalize_asok_peer_status(fs_mirror_status)
 
     def validate_snaps_status_increment(self, json_before, json_after, snap_status):
+        json_before = _normalize_asok_peer_status(json_before)
+        json_after = _normalize_asok_peer_status(json_after)
         validation_results = {}
         for path in json_before:
             before_snaps_synced = json_before[path].get(snap_status, 0)
-            after_snaps_synced = json_after[path].get(snap_status, 0)
+            after_snaps_synced = json_after.get(path, {}).get(snap_status, 0)
             validation_results[path] = after_snaps_synced > before_snaps_synced
         return validation_results
 
@@ -2023,7 +2312,7 @@ class CephfsMirroringUtils(object):
             log.error(
                 "This test requires a minimum of 1 client node on both ceph1 and ceph2."
             )
-            return 1
+            return None
 
         log.info("Preparing Clients...")
         fs_util_ceph1.prepare_clients(source_clients, build)
@@ -2071,7 +2360,7 @@ class CephfsMirroringUtils(object):
         nfs_servers = ceph_cluster.get_ceph_objects("nfs")
         if not nfs_servers:
             log.error("No NFS servers found in the Ceph cluster.")
-            return 1
+            return None
 
         nfs_server = nfs_servers[0].node.hostname
         nfs_name = "cephfs-nfs"
@@ -2084,9 +2373,21 @@ class CephfsMirroringUtils(object):
                 placement="1 %s" % nfs_server,
             )
             log.info("NFS cluster %s created successfully." % nfs_name)
+            if not fs_util_ceph1.wait_for_nfs_process(
+                source_clients[0],
+                nfs_name,
+                timeout=300,
+                interval=10,
+                desired_state="running",
+            ):
+                log.error(
+                    "NFS cluster %s did not reach running state before continuing"
+                    % nfs_name
+                )
+                return None
         except CommandFailed as e:
             log.error("Failed to create NFS cluster: %s" % e)
-            return 1
+            return None
 
         return {
             "source_clients": source_clients,
@@ -2243,7 +2544,7 @@ class CephfsMirroringUtils(object):
             f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
         )
         out, _ = asok[0].exec_command(sudo=True, cmd=cmd)
-        data = json.loads(out)
+        data = _normalize_asok_peer_status(json.loads(out))
         log.info(f"Paths found in mirror status: {list(data.keys())}")
         absolute_path = path.rstrip("/")
 
@@ -2287,7 +2588,7 @@ class CephfsMirroringUtils(object):
             f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
         )
         out, _ = asok[0].exec_command(sudo=True, cmd=cmd)
-        data = json.loads(out)
+        data = _normalize_asok_peer_status(json.loads(out))
         log.info(f"Paths found in mirror status: {list(data.keys())}")
         absolute_path = path.rstrip("/")
 
@@ -2391,6 +2692,151 @@ class CephfsMirroringUtils(object):
             )
         log.info("FSID '%s' validated for %s", remote_fsid, fs_name)
 
+    def get_mgr_mirror_status(self, source_client, fs_name):
+        """
+        Get CephFS mirror status via MGR CLI (cluster-wide, OMAP-backed).
+
+        Args:
+            source_client: Client node to run the command on.
+            fs_name (str): Filesystem name.
+
+        Returns:
+            dict: Parsed JSON output of ceph fs snapshot mirror status.
+        """
+        out, _ = source_client.exec_command(
+            sudo=True,
+            cmd=f"ceph fs snapshot mirror status {fs_name} -f json",
+        )
+        return json.loads(out)
+
+    def get_asok_peer_status_raw(self, cephfs_mirror_node, source_client, fs_name):
+        """
+        Get raw asok peer status with current_syncing_snap details.
+        Returns the full JSON dict keyed by directory path.
+
+        Args:
+            cephfs_mirror_node: Mirror daemon node (or list).
+            source_client: Source client for daemon queries.
+            fs_name (str): Filesystem name.
+
+        Returns:
+            dict: Raw peer status JSON from admin socket.
+        """
+        return self.get_fs_mirror_peer_status_using_asok(
+            cephfs_mirror_node, source_client, fs_name
+        )
+
+    def get_directory_counters(self, cephfs_mirror_node, fsid, asok_file, fs_name=None):
+        """
+        Get cephfs_mirror_directory perf counters from counter dump.
+        Returns list of entries with labels and counters.
+
+        Args:
+            cephfs_mirror_node: Mirror daemon nodes.
+            fsid (str): Cluster FSID.
+            asok_file (dict): Admin socket file mapping.
+            fs_name (str, optional): Filter by source_filesystem label.
+
+        Returns:
+            list: List of dicts with 'labels' and 'counters' keys.
+        """
+        data = self.get_cephfs_mirror_counters(cephfs_mirror_node, fsid, asok_file)
+        entries = data.get("cephfs_mirror_directory", [])
+        if fs_name:
+            entries = [
+                e
+                for e in entries
+                if e.get("labels", {}).get("source_filesystem") == fs_name
+            ]
+        return entries
+
+    def poll_asok_for_state(
+        self,
+        cephfs_mirror_node,
+        source_client,
+        fs_name,
+        path,
+        target_state,
+        timeout=120,
+        interval=5,
+    ):
+        """
+        Poll asok peer status until a directory reaches a target state.
+
+        Args:
+            cephfs_mirror_node: Mirror daemon node.
+            source_client: Source client.
+            fs_name (str): Filesystem name.
+            path (str): Directory path to monitor.
+            target_state (str): State to wait for (e.g., 'syncing', 'idle').
+            timeout (int): Max seconds to wait.
+            interval (int): Seconds between polls.
+
+        Returns:
+            dict: The status dict for the path when target state is reached.
+
+        Raises:
+            CommandFailed: If target state is not reached within timeout.
+        """
+        path = path.rstrip("/")
+        elapsed = 0
+        while elapsed < timeout:
+            try:
+                status = self.get_asok_peer_status_raw(
+                    cephfs_mirror_node, source_client, fs_name
+                )
+                if path in status:
+                    state = status[path].get("state", "unknown")
+                    log.info(
+                        "poll_asok_for_state: %s state=%s (target=%s)",
+                        path,
+                        state,
+                        target_state,
+                    )
+                    if state == target_state:
+                        return status[path]
+            except Exception as e:
+                log.warning("poll_asok_for_state error (will retry): %s", e)
+            time.sleep(interval)
+            elapsed += interval
+        raise CommandFailed(
+            f"Path '{path}' did not reach state '{target_state}' within {timeout}s"
+        )
+
+    def get_current_syncing_snap_from_asok(
+        self, cephfs_mirror_node, source_client, fs_name, path
+    ):
+        """
+        Get the current_syncing_snap details from asok peer status for a path.
+
+        Args:
+            cephfs_mirror_node: Mirror daemon node.
+            source_client: Source client.
+            fs_name (str): Filesystem name.
+            path (str): Directory path.
+
+        Returns:
+            dict or None: current_syncing_snap dict if syncing, else None.
+        """
+        path = path.rstrip("/")
+        status = self.get_asok_peer_status_raw(
+            cephfs_mirror_node, source_client, fs_name
+        )
+        if path in status:
+            return status[path].get("current_syncing_snap")
+        return None
+
+
+def _ensure_ceph_common(asok_file):
+    """One-shot helper: install ceph-common on every mirror-daemon node."""
+    for _node, asok in asok_file.items():
+        try:
+            asok[0].exec_command(
+                sudo=True, cmd="dnf install -y ceph-common --nogpgcheck"
+            )
+        except Exception as e:
+            log.warning("dnf install ceph-common failed (non-fatal): %s", e)
+
 
 @retry(CommandFailed, tries=10, delay=30, backoff=1)
 def wait_for_sync_idle(fs_name, fsid, asok_file, filesystem_id, peer_uuid, paths):
@@ -2408,14 +2854,12 @@ def wait_for_sync_idle(fs_name, fsid, asok_file, filesystem_id, peer_uuid, paths
 
     Raises:
         CommandFailed: If any path is not in 'idle' state (triggers retry).
+        RuntimeError: If asok_file is empty.
     """
-    for node, asok in asok_file.items():
-        try:
-            asok[0].exec_command(
-                sudo=True, cmd="dnf install -y ceph-common --nogpgcheck"
-            )
-        except Exception as e:
-            log.warning("dnf install ceph-common failed (non-fatal): %s", e)
+    if not asok_file:
+        raise RuntimeError("asok_file dict is empty; no mirror daemon to query")
+
+    node, asok = next(iter(asok_file.items()))
     asok_basename = asok[1].rsplit("/", 1)[-1]
     asok_dir = f"/var/run/ceph/{fsid}"
     cmd = (
@@ -2423,14 +2867,15 @@ def wait_for_sync_idle(fs_name, fsid, asok_file, filesystem_id, peer_uuid, paths
         f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
     )
     out, _ = asok[0].exec_command(sudo=True, cmd=cmd)
-    data = json.loads(out)
+    data = _normalize_asok_peer_status(json.loads(out))
 
     for path in paths:
         absolute_path = path.rstrip("/")
         if absolute_path not in data:
             raise CommandFailed(f"Path '{absolute_path}' not found in mirror status")
-        state = data[absolute_path].get("state", "unknown")
-        synced = data[absolute_path].get("snaps_synced", 0)
+        path_data = data[absolute_path]
+        state = path_data.get("state", "unknown")
+        synced = path_data.get("snaps_synced", 0)
         log.info("%s state=%s snaps_synced=%s", absolute_path, state, synced)
         if state != "idle":
             raise CommandFailed(
@@ -2438,3 +2883,252 @@ def wait_for_sync_idle(fs_name, fsid, asok_file, filesystem_id, peer_uuid, paths
             )
 
     log.info("All paths are in idle state")
+
+
+def wait_for_idle(
+    fs_mirroring_utils,
+    cephfs_mirror_node,
+    source_client,
+    fs_name,
+    path,
+    timeout=300,
+    interval=15,
+):
+    """Poll asok peer status until path reaches idle state or timeout.
+
+    Single canonical implementation shared across all 9.2 test modules.
+
+    Args:
+        fs_mirroring_utils: CephfsMirroringUtils instance.
+        cephfs_mirror_node: Mirror daemon node object.
+        source_client: Source cluster client.
+        fs_name (str): Filesystem name.
+        path (str): Subvolume path to monitor.
+        timeout (int): Maximum seconds to wait (default 300).
+        interval (int): Poll interval in seconds (default 15).
+
+    Returns:
+        dict: Path status at idle state.
+
+    Raises:
+        CommandFailed: If path does not reach idle within timeout.
+    """
+    path_key = path.rstrip("/")
+    elapsed = 0
+    while elapsed < timeout:
+        try:
+            peer_status = fs_mirroring_utils.get_fs_mirror_peer_status_using_asok(
+                cephfs_mirror_node, source_client, fs_name
+            )
+            path_status = peer_status.get(path_key, {})
+            state = path_status.get("state", "unknown")
+            log.info(
+                "[wait_for_idle %ds/%ds] path=%s state=%s snaps_synced=%s",
+                elapsed,
+                timeout,
+                path_key,
+                state,
+                path_status.get("snaps_synced"),
+            )
+            if state == "idle":
+                return path_status
+        except Exception as e:
+            log.warning("wait_for_idle poll error (will retry): %s", e)
+        time.sleep(interval)
+        elapsed += interval
+    raise CommandFailed("Path '%s' did not reach idle within %ds" % (path_key, timeout))
+
+
+# 9.2 Metrics Schema Constants
+PEER_STATUS_TOP_LEVEL_FIELDS = [
+    "state",
+    "snaps_synced",
+    "snaps_deleted",
+    "snaps_renamed",
+]
+
+CURRENT_SYNCING_SNAP_FIELDS = [
+    "id",
+    "name",
+    "sync-mode",
+    "avg_read_throughput_bytes",
+    "avg_write_throughput_bytes",
+    "crawl",
+    "datasync_queue_wait",
+    "bytes",
+    "files",
+    "eta",
+]
+
+CURRENT_SYNCING_SNAP_BYTES_FIELDS = ["sync_bytes", "total_bytes", "sync_percent"]
+CURRENT_SYNCING_SNAP_FILES_FIELDS = ["sync_files", "total_files", "sync_percent"]
+CURRENT_SYNCING_SNAP_CRAWL_FIELDS = ["state", "duration"]
+
+LAST_SYNCED_SNAP_FIELDS = ["id", "name", "sync_duration", "sync_bytes"]
+
+
+def validate_peer_status_schema(peer_status, paths, expected_state=None):
+    """
+    Validate that peer_status JSON contains expected top-level fields for given paths.
+
+    Args:
+        peer_status (dict): JSON output from asok peer status or MGR status,
+                            keyed by directory path.
+        paths (list): List of directory paths to validate.
+        expected_state (str, optional): If provided, assert state matches this value.
+
+    Returns:
+        dict: {path: status_dict} for each validated path.
+
+    Raises:
+        CommandFailed: If a path is missing or required fields are absent.
+    """
+    results = {}
+    for path in paths:
+        path_key = path.rstrip("/")
+        if path_key not in peer_status:
+            raise CommandFailed(
+                f"Path '{path_key}' not found in peer status. "
+                f"Available paths: {list(peer_status.keys())}"
+            )
+        status = peer_status[path_key]
+
+        missing_fields = [f for f in PEER_STATUS_TOP_LEVEL_FIELDS if f not in status]
+        if missing_fields:
+            raise CommandFailed(
+                f"Path '{path_key}' missing required fields: {missing_fields}"
+            )
+
+        state = status.get("state")
+        if expected_state and state != expected_state:
+            raise CommandFailed(
+                f"Path '{path_key}' state='{state}', expected '{expected_state}'"
+            )
+
+        log.info(
+            "Schema validated for %s: state=%s, snaps_synced=%s",
+            path_key,
+            state,
+            status.get("snaps_synced"),
+        )
+        results[path_key] = status
+    return results
+
+
+def validate_current_syncing_snap_schema(current_syncing_snap, strict=True):
+    """
+    Validate current_syncing_snap nested object contains expected 9.2 fields.
+
+    Args:
+        current_syncing_snap (dict): The current_syncing_snap dict from peer status.
+        strict (bool): If True, raise on missing fields. If False, log warnings only.
+
+    Returns:
+        dict: Validation result with field presence and values:
+              {"fields_present": [...], "fields_missing": [...], "values": {...}}
+
+    Raises:
+        CommandFailed: If strict=True and required fields are missing.
+    """
+    if not current_syncing_snap or not isinstance(current_syncing_snap, dict):
+        if strict:
+            raise CommandFailed("current_syncing_snap is empty or not a dict")
+        return {
+            "fields_present": [],
+            "fields_missing": CURRENT_SYNCING_SNAP_FIELDS,
+            "values": {},
+        }
+
+    present = []
+    missing = []
+    values = {}
+
+    for field in CURRENT_SYNCING_SNAP_FIELDS:
+        if field in current_syncing_snap:
+            present.append(field)
+            values[field] = current_syncing_snap[field]
+        else:
+            missing.append(field)
+
+    # Validate nested bytes fields
+    bytes_info = current_syncing_snap.get("bytes", {})
+    if isinstance(bytes_info, dict):
+        for bf in CURRENT_SYNCING_SNAP_BYTES_FIELDS:
+            if bf in bytes_info:
+                values[f"bytes.{bf}"] = bytes_info[bf]
+            elif strict:
+                missing.append(f"bytes.{bf}")
+
+    # Validate nested files fields
+    files_info = current_syncing_snap.get("files", {})
+    if isinstance(files_info, dict):
+        for ff in CURRENT_SYNCING_SNAP_FILES_FIELDS:
+            if ff in files_info:
+                values[f"files.{ff}"] = files_info[ff]
+            elif strict:
+                missing.append(f"files.{ff}")
+
+    # Validate crawl fields
+    crawl_info = current_syncing_snap.get("crawl", {})
+    if isinstance(crawl_info, dict):
+        for cf in CURRENT_SYNCING_SNAP_CRAWL_FIELDS:
+            if cf in crawl_info:
+                values[f"crawl.{cf}"] = crawl_info[cf]
+            elif strict:
+                missing.append(f"crawl.{cf}")
+
+    if missing:
+        msg = f"current_syncing_snap missing fields: {missing}"
+        if strict:
+            raise CommandFailed(msg)
+        log.warning(msg)
+    else:
+        log.info("current_syncing_snap schema fully validated: all fields present")
+
+    log.info("Fields present: %s", present)
+    for key, val in values.items():
+        log.info("  %s = %s", key, val)
+
+    return {"fields_present": present, "fields_missing": missing, "values": values}
+
+
+def validate_last_synced_snap_schema(last_synced_snap, expected_snap_name=None):
+    """
+    Validate last_synced_snap contains enriched 9.2 fields.
+
+    Args:
+        last_synced_snap (dict): The last_synced_snap dict from peer status.
+        expected_snap_name (str, optional): If provided, assert snap name matches.
+
+    Returns:
+        dict: The validated last_synced_snap dict.
+
+    Raises:
+        CommandFailed: If required fields are missing or snap name doesn't match.
+    """
+    if not last_synced_snap or not isinstance(last_synced_snap, dict):
+        raise CommandFailed("last_synced_snap is empty or not a dict")
+
+    missing = [f for f in LAST_SYNCED_SNAP_FIELDS if f not in last_synced_snap]
+    if missing:
+        raise CommandFailed(
+            f"last_synced_snap missing required fields: {missing}. "
+            f"Got: {list(last_synced_snap.keys())}"
+        )
+
+    if expected_snap_name:
+        actual_name = last_synced_snap.get("name")
+        if actual_name != expected_snap_name:
+            raise CommandFailed(
+                f"last_synced_snap name='{actual_name}', "
+                f"expected '{expected_snap_name}'"
+            )
+
+    log.info(
+        "last_synced_snap validated: id=%s, name=%s, sync_duration=%s, sync_bytes=%s",
+        last_synced_snap.get("id"),
+        last_synced_snap.get("name"),
+        last_synced_snap.get("sync_duration"),
+        last_synced_snap.get("sync_bytes"),
+    )
+    return last_synced_snap

@@ -27,6 +27,11 @@ from ceph.rados import utils as osd_utils
 from tests.rados.rados_test_util import wait_for_device_rados
 from utility import utils
 from utility.log import Log
+from utility.odf_defaults import (
+    _mon_name_and_ip,
+    format_mons_for_kernel_mount,
+    is_msgr1_disabled,
+)
 
 log = Log(__name__)
 
@@ -524,9 +529,12 @@ class RadosOrchestrator:
             log.debug("Retrying check after 15 seconds")
             time.sleep(5)
         else:
-            log_error_msg = f"Stats in the pool did not match the expected object count {exp_objs} \
-                within timeout {timeout}"
-            log.error(log_error_msg)
+            log.error(
+                "Stats in the pool did not match the expected object count %s "
+                "within timeout %s",
+                exp_objs,
+                timeout,
+            )
             return False
         return True
 
@@ -4345,6 +4353,146 @@ EOF"""
                 return True
         return True
 
+    def change_daemon_orch_state(
+        self, action: str, daemon_type: str, daemon_id: str, timeout: int = 120
+    ) -> bool:
+        """Start, stop, or restart a daemon via ``ceph orch daemon`` commands.
+
+        Executes ``ceph orch daemon {action} {daemon_type}.{daemon_id}``
+        and polls ``get_daemon_status`` every 10 seconds until the daemon
+        reaches the expected state or the timeout expires.
+
+        Behavior notes:
+
+        * If the daemon is already in the desired state (e.g. ``stop``
+          requested but daemon is already stopped), the method returns
+          ``True`` immediately without issuing the orch command.
+        * If the daemon is not found via ``get_daemon_status`` before
+          issuing the command, a warning is logged but the action is
+          still attempted.
+        * For ``restart``, the expected post-action state is
+          ``running`` (status 1).
+
+        Args:
+            action (str): One of ``"stop"``, ``"start"``, or
+                ``"restart"``.
+            daemon_type (str): Daemon type string (e.g. ``"nfs"``,
+                ``"smb"``, ``"mds"``, ``"mgr"``, ``"mon"``, ``"osd"``).
+            daemon_id (str): Daemon identifier as shown by
+                ``ceph orch ps`` (e.g. ``"nfs-cluster-1.node1.abcdef"``).
+            timeout (int): Maximum seconds to wait for the daemon to
+                reach the desired state (default 120).
+
+        Returns:
+            bool: ``True`` if the daemon reached the desired state within
+            *timeout*, ``False`` otherwise.
+
+        Examples:
+            Stop an NFS daemon and wait up to 2 minutes::
+
+                rados_obj.change_daemon_orch_state(
+                    action="stop",
+                    daemon_type="nfs",
+                    daemon_id="nfs-cluster-1.node1.abcdef",
+                )
+
+            Restart an MDS daemon with a longer timeout::
+
+                rados_obj.change_daemon_orch_state(
+                    action="restart",
+                    daemon_type="mds",
+                    daemon_id="cephfs.node2.ghijkl",
+                    timeout=300,
+                )
+        """
+        allowed_actions = ("stop", "start", "restart")
+        if action not in allowed_actions:
+            raise ValueError(
+                f"Invalid action '{action}'. Must be one of {allowed_actions}"
+            )
+
+        daemon_name = f"{daemon_type}.{daemon_id}"
+        log.info(
+            "[orch_state] Requesting '%s' on %s (timeout=%ss)",
+            action,
+            daemon_name,
+            timeout,
+        )
+
+        result = self.get_daemon_status(daemon_type=daemon_type, daemon_id=daemon_id)
+        if not result:
+            log.warning(
+                "[orch_state] %s not found in orch ps, proceeding with %s anyway",
+                daemon_name,
+                action,
+            )
+        else:
+            daemon_status, status_desc = result
+            if (
+                action == "stop" and (daemon_status == 0 or status_desc == "stopped")
+            ) or (
+                action == "start" and (daemon_status == 1 or status_desc == "running")
+            ):
+                log.info(
+                    "[orch_state] %s already in desired state (%s), skipping %s",
+                    daemon_name,
+                    status_desc,
+                    action,
+                )
+                return True
+
+        cmd = f"ceph orch daemon {action} {daemon_name}"
+        self.client.exec_command(sudo=True, cmd=cmd, timeout=30)
+        log.info("[orch_state] Executed: %s", cmd)
+        time.sleep(5)
+
+        if action in ("stop", "start"):
+            want_status = 0 if action == "stop" else 1
+            want_desc = "stopped" if action == "stop" else "running"
+        else:
+            want_status = 1
+            want_desc = "running"
+
+        start_time = datetime.datetime.now()
+        timeout_time = start_time + datetime.timedelta(seconds=timeout)
+        daemon_status = None
+        status_desc = "unknown"
+        while datetime.datetime.now() <= timeout_time:
+            result = self.get_daemon_status(
+                daemon_type=daemon_type, daemon_id=daemon_id
+            )
+            if not result:
+                log.debug("[orch_state] Poll %s: not found, retrying", daemon_name)
+                time.sleep(10)
+                continue
+            daemon_status, status_desc = result
+            log.debug(
+                "[orch_state] Poll %s: status=%s, desc=%s",
+                daemon_name,
+                daemon_status,
+                status_desc,
+            )
+            if daemon_status == want_status or status_desc == want_desc:
+                log.info(
+                    "[orch_state] %s reached '%s' after %s",
+                    daemon_name,
+                    want_desc,
+                    action,
+                )
+                return True
+            time.sleep(10)
+
+        log.error(
+            "[orch_state] Timeout waiting for %s to reach '%s' after %s "
+            "(last status=%s, desc=%s)",
+            daemon_name,
+            want_desc,
+            action,
+            daemon_status,
+            status_desc,
+        )
+        return False
+
     def get_osd_uuid(self, osd_id):
         """
         Method return ths osd fsid
@@ -5299,6 +5447,7 @@ EOF"""
         check_mds=False,
         check_nfs=False,
         check_rgw=False,
+        check_smb=False,
     ):
         """
         Module to check crashes on the cluster using multiple methods:
@@ -5316,6 +5465,8 @@ EOF"""
             check_nfs: If True, also scan NFS-Ganesha daemon logs for crash
                        patterns (via cephadm logs / journalctl)
             check_rgw: If True, also scan RGW daemon logs for crash patterns
+            check_smb: If True, also scan SMB/Samba daemon logs for crash
+                       patterns (via cephadm logs / journalctl)
 
         Returns:
             True -> crash detected (in either crash ls or log scan)
@@ -5353,6 +5504,8 @@ EOF"""
                     daemon_types.append("nfs")
                 if check_rgw:
                     daemon_types.append("rgw")
+                if check_smb:
+                    daemon_types.append("smb")
 
                 crash_report = self.scan_daemon_logs_for_crashes(
                     start_time=start_time,
@@ -7277,9 +7430,38 @@ EOF"""
         client_node.exec_command(
             cmd=f"mkdir -p {mount_path}", sudo=True, check_ec=False
         )
-        client_node.exec_command(
-            cmd=f"mount -t ceph admin@.{fs_name}=/ {mount_path}", sudo=True
+        use_msgr2 = is_msgr1_disabled(client_node)
+        mount_opts = []
+        if use_msgr2:
+            mount_opts.append("ms_mode=crc")
+            try:
+                mon_dump = self.run_ceph_command(cmd="ceph mon dump", client_exec=True)
+                mon_addrs = []
+                for mon in mon_dump.get("mons") or []:
+                    parsed = _mon_name_and_ip(mon)
+                    if parsed:
+                        # mount.ceph mon_addr uses slash-separated IP:port
+                        mon_addrs.append(format_mons_for_kernel_mount(parsed[1], True))
+            except Exception as exc:
+                log.error("Could not build mon_addr for msgr2 mount: %s", exc)
+                raise CommandFailed(
+                    f"Could not build mon_addr for msgr2 CephFS mount: {exc}"
+                ) from exc
+            if not mon_addrs:
+                log.error(
+                    "msgr2 mount requires mon_addr but mon dump had no usable mons"
+                )
+                raise CommandFailed("missing mon_addr for msgr2 CephFS mount")
+            mount_opts.append("mon_addr=" + "/".join(mon_addrs))
+        mount_cmd = f"mount -t ceph admin@.{fs_name}=/ {mount_path}"
+        if mount_opts:
+            mount_cmd += " -o " + ",".join(mount_opts)
+        client_node.exec_command(cmd=mount_cmd, sudo=True)
+        mount_out, mount_rc = client_node.exec_command(
+            cmd=f"findmnt -T {mount_path}", sudo=True, check_ec=False
         )
+        if mount_rc != 0 or mount_path not in (mount_out or ""):
+            raise CommandFailed(f"CephFS mount missing at {mount_path}")
         log.info(f"Mounted CephFS at {mount_path}")
 
         # Return created pool names
@@ -7311,30 +7493,79 @@ EOF"""
         rdma_port: Optional[int] = None,
         enable_nfsv3: bool = False,
         nfs_placement_label: Optional[str] = None,
+        enable_pec: bool = False,
     ) -> dict:
-        """
-        Create NFS clusters with a dedicated CephFS filesystem and exports.
+        """Create NFS clusters with a dedicated CephFS filesystem and exports.
+
+        Creates a CephFS filesystem, then provisions ``num_clusters`` NFS
+        clusters each with ``exports_per_cluster`` pseudo-path exports.
+        Hosts for each cluster are selected via round-robin from the
+        available host list so that consecutive clusters start on
+        different hosts (cluster *i* begins at ``available_hosts[i]``
+        and wraps around using modular arithmetic for ``placement``
+        hosts).
+
+        Placement is validated before any cluster is created:
+
+        * Must be a positive integer (``>= 1``).
+        * Must not exceed the number of available hosts; a ``ValueError``
+          is raised otherwise.
 
         Args:
-            client_node: Client node to execute commands
-            num_clusters: Number of NFS clusters to create (default: 3)
-            exports_per_cluster: Number of exports per cluster (default: 4)
-            placement: Placement count for NFS daemons (default: 1)
-            nfs_fs_name: CephFS filesystem name for NFS (default: "nfs-cephfs")
-            pool_type: Pool type for CephFS - "erasure" or "replicated"
-            enable_fast_ec_config_params: Whether to enable fast EC config params
-            enable_rdma: Pass --enable-rdma to ceph nfs cluster create
-            rdma_port: Optional base RDMA port; per-cluster port is
-                rdma_port + cluster_index (same pattern as NFS TCP 2049+i).
-                If omitted when enable_rdma is True, uses ``NFS_RDMA_DEFAULT_BASE_PORT``
-                (20049), i.e. 20049, 20050, … for multi-cluster.
-            enable_nfsv3: Pass --enable-nfsv3 to ceph nfs cluster create
-            nfs_placement_label: If set, prefer orch hosts whose ``labels`` include
-                this string. If no orch host has the label, fall back to all orch hosts.
-                If unset, use all orch hosts.
+            client_node: Client node to execute commands.
+            num_clusters (int): Number of NFS clusters to create (default: 3).
+            exports_per_cluster (int): Number of exports per cluster
+                (default: 4).
+            placement (int): Number of NFS daemon hosts per cluster
+                (default: 1). Validated to be a positive integer that does
+                not exceed the available host count.
+            nfs_fs_name (str): CephFS filesystem name for NFS
+                (default: ``"nfs-cephfs"``).
+            pool_type (str): Pool type for CephFS -- ``"erasure"`` or
+                ``"replicated"``.
+            enable_fast_ec_config_params (bool): Whether to enable fast EC
+                config params.
+            enable_rdma (bool): Pass ``--enable-rdma`` to
+                ``ceph nfs cluster create``.
+            rdma_port (int or None): Optional base RDMA port; per-cluster
+                port is ``rdma_port + cluster_index`` (same pattern as NFS
+                TCP 2049+i). If omitted when *enable_rdma* is True, uses
+                ``NFS_RDMA_DEFAULT_BASE_PORT`` (20049).
+            enable_nfsv3 (bool): Pass ``--enable-nfsv3`` to
+                ``ceph nfs cluster create``.
+            nfs_placement_label (str or None): If set, prefer orch hosts
+                whose ``labels`` include this string. If no orch host has
+                the label, fall back to all orch hosts. If unset, use all
+                orch hosts.
+            enable_pec (bool): Create each export on a CephFS subvolume with
+                ``--cmount_path`` (per-export client). Never uses ``--path=/``
+                (IBMCEPH-17356). Caller must version-gate (>= 20.2.2).
 
         Returns:
-            Dict with nfs_config containing clusters, exports, fs_name, and pool info
+            dict: NFS configuration with structure::
+
+                {
+                    "nfs_config": {
+                        "clusters": [
+                            {
+                                "cluster_id": str,
+                                "port": int,
+                                "host": str,       # first selected host
+                                "hosts": [str],    # all placement hosts
+                                "rdma_port": int or None,
+                            },
+                            ...
+                        ],
+                        "exports": [...],
+                        "fs_name": str,
+                        "pool_info": {...},
+                    }
+                }
+
+        Raises:
+            ValueError: If no hosts are available for NFS placement, or
+                if *placement* is not a positive integer, or if it exceeds
+                the available host count.
         """
         rdma_base = (
             (rdma_port if rdma_port is not None else NFS_RDMA_DEFAULT_BASE_PORT)
@@ -7347,6 +7578,7 @@ EOF"""
             f"{exports_per_cluster} exports each"
             f"{', RDMA enabled' if enable_rdma else ''}"
             f"{', NFSv3 enabled on cluster' if enable_nfsv3 else ''}"
+            f"{', PEC (cmount_path)' if enable_pec else ''}"
         )
 
         # Step 1: Create CephFS filesystem for NFS
@@ -7400,6 +7632,22 @@ EOF"""
             raise ValueError(
                 "create_nfs_clusters_and_exports: no hosts available for NFS placement"
             )
+        try:
+            placement = int(placement)
+        except (TypeError, ValueError) as err:
+            raise ValueError(
+                f"create_nfs_clusters_and_exports: placement must be an integer, got {placement!r}"
+            ) from err
+        if placement < 1:
+            raise ValueError(
+                f"create_nfs_clusters_and_exports: placement must be >= 1, got {placement}"
+            )
+        if placement > len(available_hosts):
+            raise ValueError(
+                "create_nfs_clusters_and_exports: placement "
+                f"{placement} exceeds available host count {len(available_hosts)}. "
+                f"Available hosts: {available_hosts}"
+            )
         log.info("NFS cluster placement hosts: %s", available_hosts)
 
         # Step 2: Create NFS clusters with unique ports starting from 2049
@@ -7409,20 +7657,25 @@ EOF"""
             cluster_id = f"nfs-cluster-{i + 1}"
             port = base_port + i
 
-            # Distribute clusters across hosts (round-robin)
-            host_idx = i % len(available_hosts)
-            selected_host = available_hosts[host_idx]
-            placement_str = f'"{placement} {selected_host}"'
+            # Build placement hosts per cluster using round-robin selection.
+            selected_hosts = [
+                available_hosts[(i + offset) % len(available_hosts)]
+                for offset in range(placement)
+            ]
+            placement_hosts = " ".join(selected_hosts)
+            placement_str = f'"{placement} {placement_hosts}"'
+            selected_host = selected_hosts[0]
 
             cluster_rdma_port = (rdma_base + i) if enable_rdma else None
-            log.info(
-                f"Creating NFS cluster: {cluster_id} on port {port}, host {selected_host}"
-                + (
-                    f", rdma_port {cluster_rdma_port}"
-                    if cluster_rdma_port is not None
-                    else ""
-                )
+            _nfs_create_msg = (
+                "Creating NFS cluster: %s on port %s, placement %s, "
+                "selected_hosts %s"
             )
+            _nfs_create_args = [cluster_id, port, placement, selected_hosts]
+            if cluster_rdma_port is not None:
+                _nfs_create_msg += ", rdma_port %s"
+                _nfs_create_args.append(cluster_rdma_port)
+            log.info(_nfs_create_msg, *_nfs_create_args)
 
             cmd = f"ceph nfs cluster create {cluster_id} {placement_str} --port={port}"
             if enable_nfsv3:
@@ -7434,6 +7687,7 @@ EOF"""
                 "cluster_id": cluster_id,
                 "port": port,
                 "host": selected_host,
+                "hosts": selected_hosts,
                 "rdma_port": cluster_rdma_port,
             }
             clusters.append(cluster_entry)
@@ -7446,27 +7700,85 @@ EOF"""
 
         # Step 3: Create exports for each cluster
         exports = []
+        pec_svg = "pecgroup" if enable_pec else None
+        if enable_pec:
+            log.info("PEC: ensuring subvolume group %s on %s", pec_svg, nfs_fs_name)
+            self.client.exec_command(
+                cmd=(
+                    f"ceph fs subvolumegroup create {nfs_fs_name} {pec_svg} "
+                    "2>/dev/null || true"
+                ),
+                sudo=True,
+                check_ec=False,
+            )
         for cluster in clusters:
             cluster_id = cluster["cluster_id"]
             for j in range(exports_per_cluster):
                 pseudo_path = f"/export/{cluster_id}/path{j + 1}"
 
                 log.info(f"Creating NFS export: {pseudo_path} on cluster {cluster_id}")
-                cmd = (
-                    f"ceph nfs export create cephfs {cluster_id} {pseudo_path} "
-                    f"{nfs_fs_name} --path=/"
-                )
+                export_entry = {
+                    "cluster_id": cluster_id,
+                    "pseudo_path": pseudo_path,
+                    "fs_name": nfs_fs_name,
+                }
+                sv_name = None
                 try:
+                    if enable_pec:
+                        sv_name = f"nfsvol_{cluster_id}_{j + 1}".replace("-", "_")
+                        self.client.exec_command(
+                            cmd=(
+                                f"ceph fs subvolume create {nfs_fs_name} {sv_name} "
+                                f"--group_name {pec_svg} --namespace-isolated"
+                            ),
+                            sudo=True,
+                        )
+                        sv_path, _ = self.client.exec_command(
+                            cmd=(
+                                f"ceph fs subvolume getpath {nfs_fs_name} {sv_name} "
+                                f"--group_name {pec_svg}"
+                            ),
+                            sudo=True,
+                        )
+                        sv_path = (sv_path or "").strip()
+                        if not sv_path:
+                            raise RuntimeError(
+                                f"empty getpath for {sv_name} on {nfs_fs_name}"
+                            )
+                        cmd = (
+                            f"ceph nfs export create cephfs {cluster_id} "
+                            f"{pseudo_path} {nfs_fs_name} "
+                            f"--path={sv_path} --cmount_path={sv_path}"
+                        )
+                        export_entry["sv_name"] = sv_name
+                        export_entry["svg"] = pec_svg
+                        export_entry["sv_path"] = sv_path
+                    else:
+                        cmd = (
+                            f"ceph nfs export create cephfs {cluster_id} "
+                            f"{pseudo_path} {nfs_fs_name} --path=/"
+                        )
                     self.client.exec_command(cmd=cmd, sudo=True)
-                    exports.append(
-                        {
-                            "cluster_id": cluster_id,
-                            "pseudo_path": pseudo_path,
-                            "fs_name": nfs_fs_name,
-                        }
-                    )
+                    exports.append(export_entry)
                 except Exception as e:
                     log.warning(f"Failed to create export {pseudo_path}: {e}")
+                    # PEC: never leave an orphaned subvolume without an export
+                    if enable_pec and sv_name and pec_svg:
+                        try:
+                            self.client.exec_command(
+                                cmd=(
+                                    f"ceph fs subvolume rm {nfs_fs_name} {sv_name} "
+                                    f"--group_name {pec_svg} --force"
+                                ),
+                                sudo=True,
+                                check_ec=False,
+                            )
+                        except Exception as rm_e:
+                            log.warning(
+                                "Failed to cleanup PEC subvolume %s: %s",
+                                sv_name,
+                                rm_e,
+                            )
 
         log.info(f"Created {len(exports)} NFS exports across {len(clusters)} clusters")
 
@@ -7491,6 +7803,8 @@ EOF"""
             "pools": created_pools,
             "enable_rdma": enable_rdma,
             "enable_nfsv3": enable_nfsv3,
+            "enable_pec": enable_pec,
+            "pec_svg": pec_svg,
         }
 
     def cleanup_nfs_clusters(self, nfs_config: dict) -> None:
@@ -7515,6 +7829,21 @@ EOF"""
                 log.debug(f"Deleted NFS export: {pseudo_path}")
             except Exception as e:
                 log.warning(f"Failed to delete export {pseudo_path}: {e}")
+            sv_name = export.get("sv_name")
+            svg = export.get("svg")
+            fs_name = export.get("fs_name")
+            if sv_name and svg and fs_name:
+                try:
+                    self.client.exec_command(
+                        cmd=(
+                            f"ceph fs subvolume rm {fs_name} {sv_name} "
+                            f"--group_name {svg} --force"
+                        ),
+                        sudo=True,
+                        check_ec=False,
+                    )
+                except Exception as e:
+                    log.warning(f"Failed to delete subvolume {sv_name}: {e}")
 
         # Step 2: Delete NFS clusters
         for cluster in nfs_config.get("clusters", []):
@@ -7724,3 +8053,40 @@ EOF"""
         ]
 
         return mount_path, device_path, created_pools
+
+    def setup_crimson_pre_req(self, **kwargs) -> None:
+        """
+        Setup Crimson pre-requisites for the cluster.
+
+        This method enables experimental Crimson features, allows Crimson OSD usage,
+        sets the default pool type to Crimson, and configures Crimson-specific thread settings.
+
+        Args:
+            crimson_seastar_num_threads (int, optional): Number of threads for Crimson Seastar.
+            crimson_alien_op_num_threads (int, optional): Number of threads for Crimson alienized objectstore.
+        """
+        crimson_seastar_num_threads = kwargs.get("crimson_seastar_num_threads", 1)
+        crimson_alien_op_num_threads = kwargs.get("crimson_alien_op_num_threads", 6)
+
+        log.info(
+            "Setting up Crimson pre-requisites for the cluster with the following parameters:"
+        )
+        log.info("Crimson Seastar number of threads: %s", crimson_seastar_num_threads)
+        log.info(
+            "Crimson Alien operation number of threads: %s",
+            crimson_alien_op_num_threads,
+        )
+
+        exp_cmds = [
+            "ceph config set global 'enable_experimental_unrecoverable_data_corrupting_features' crimson",
+            "ceph osd set-allow-crimson --yes-i-really-mean-it",
+            "ceph config set mon osd_pool_default_crimson true",
+        ]
+        cfg_cmds = [
+            f"ceph config set osd crimson_seastar_num_threads {crimson_seastar_num_threads}",
+            f"ceph config set osd crimson_alien_op_num_threads {crimson_alien_op_num_threads}",
+        ]
+        for cmd in exp_cmds + cfg_cmds:
+            self.node.shell([cmd])
+
+        log.info("Crimson pre-requisites setup completed.")

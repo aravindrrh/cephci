@@ -1,5 +1,9 @@
 from ceph.nvmeof.cli.v1.execute import ExecuteCommandMixin
 
+from .common import substitute_keys
+
+KEY_MAP = {"rbd-image-size": "size"}
+
 
 class Namespace:
     """NVMeoF Namespace operations."""
@@ -8,6 +12,7 @@ class Namespace:
         self.base = base
         self.name = "namespace"
 
+    @substitute_keys(KEY_MAP)
     def add(self, **kwargs):
         """Adds namespace for subsystem."""
         return self.base.run_nvme_cli(self.name, "add", **kwargs)
@@ -21,6 +26,10 @@ class Namespace:
         return self.base.run_nvme_cli(
             self.name, "change_load_balancing_group", **kwargs
         )
+
+    def change_location(self, **kwargs):
+        """Change location for namespace under subsystem."""
+        return self.base.run_nvme_cli(self.name, "change_location", **kwargs)
 
     def change_visibility(self, **kwargs):
         """Change visibility for namespace under subsystem."""
@@ -38,10 +47,19 @@ class Namespace:
         """Get IO Stats for namespace."""
         return self.base.run_nvme_cli(self.name, "get_io_stats", **kwargs)
 
+    def get(self, **kwargs):
+        """Get namespace details."""
+        return self.base.run_nvme_cli(self.name, "get", **kwargs)
+
     def list(self, **kwargs):
         """Lists namespaces under subsystem."""
         return self.base.run_nvme_cli(self.name, "list", **kwargs)
 
+    def list_hosts(self, **kwargs):
+        """List hosts allowed for a namespace."""
+        return self.base.run_nvme_cli(self.name, "list_hosts", **kwargs)
+
+    @substitute_keys(KEY_MAP)
     def resize(self, **kwargs):
         """Resize namespace under subsystem."""
         return self.base.run_nvme_cli(self.name, "resize", **kwargs)
@@ -50,6 +68,7 @@ class Namespace:
         """Set QoS for a namespace."""
         return self.base.run_nvme_cli(self.name, "set_qos", **kwargs)
 
+    @substitute_keys(KEY_MAP)
     def set_auto_resize(self, **kwargs):
         """Set auto-resize for a namespace."""
         return self.base.run_nvme_cli(self.name, "set_auto_resize", **kwargs)

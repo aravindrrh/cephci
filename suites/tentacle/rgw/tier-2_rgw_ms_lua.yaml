@@ -310,7 +310,6 @@ tests:
             commands:
               - "sleep 120"
               - "radosgw-admin realm pull --rgw-realm india --url http://{node_ip:ceph-pri#node1}:5000 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-              - "radosgw-admin period pull --url http://{node_ip:ceph-pri#node1}:5000 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints http://{node_ip:node1}:5000 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin period update --rgw-realm india --commit"
               - "ceph orch restart {service_name:shared.sec.io}"
@@ -438,4 +437,67 @@ tests:
           config:
             script-name: ../aws/test_lua_script_prerequest.py
             config-file-name: ../../aws/configs/test_aws_lua_object_lock_governance.yaml
+            verify-io-on-site: ["ceph-sec"]
+
+  - test:
+      name: Lua script prerequest test with block object lock request
+      desc: Test Lua block_request.lua blocks create-bucket without object lock (COMPLIANCE)
+      polarion-id: CEPH-83632419
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_lua_script_prerequest.py
+            config-file-name: ../../aws/configs/test_aws_lua_block_object_lock_request.yaml
+            verify-io-on-site: ["ceph-sec"]
+
+  - test:
+      name: Lua script prerequest test with block object lock request governance
+      desc: Test Lua block_request.lua blocks create-bucket without object lock (GOVERNANCE)
+      polarion-id: CEPH-83632419
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_lua_script_prerequest.py
+            config-file-name: ../../aws/configs/test_aws_lua_block_object_lock_request_governance.yaml
+            verify-io-on-site: ["ceph-sec"]
+
+  - test:
+      name: Lua postAuth bytecode cache test with awscli
+      desc: Test Lua postAuth bytecode cache test with awscli
+      polarion-id: CEPH-83633003
+      module: sanity_rgw_multisite.py
+      known-issues: IBMCEPH-18046
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_lua_postauth_cache.py
+            config-file-name: ../../aws/configs/test_aws_lua_postauth_cache.yaml
+            verify-io-on-site: ["ceph-sec"]
+
+  - test:
+      name: Lua prerequest stale bytecode cache test
+      desc: Test Lua prerequest script A warm-up then script B runs after rm+put (stale bytecode)
+      polarion-id: CEPH-83633020
+      module: sanity_rgw_multisite.py
+      known-issues: IBMCEPH-19435
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_lua_postauth_cache.py
+            config-file-name: ../../aws/configs/test_aws_lua_prerequest_stale_bytecode_cache.yaml
+            verify-io-on-site: ["ceph-sec"]
+
+  - test:
+      name: Lua prerequest cache invalidation test
+      desc: Test Lua prerequest blocking script takes effect immediately on put_object
+      polarion-id: CEPH-83633021
+      module: sanity_rgw_multisite.py
+      known-issues: IBMCEPH-19436
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_lua_postauth_cache.py
+            config-file-name: ../../aws/configs/test_aws_lua_prerequest_cache_invalidation.yaml
             verify-io-on-site: ["ceph-sec"]

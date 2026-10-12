@@ -1,16 +1,20 @@
 import json
-from concurrent.futures import ThreadPoolExecutor
-from time import sleep
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from time import monotonic, sleep
 
 from ceph.waiter import WaitUntil
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
 from cli.utilities.filesys import Unmount
+from tests.nfs.export_mount_kwargs import mount_opts_from_kwargs, pop_upgrade_kwargs
 from tests.nfs.nfs_operations import (
     NfsCleanupFailed,
     _get_client_specific_mount_versions,
     exports_mounts_perclient,
+    init_cluster_health_check,
+    log_cluster_health_and_check_crashes,
     mount_retry,
+    wait_for_nfs_and_mount,
 )
 from tests.nfs.test_nfs_multiple_operations_for_upgrade import (
     create_file,
@@ -22,6 +26,31 @@ from tests.nfs.test_nfs_multiple_operations_for_upgrade import (
 from utility.log import Log
 
 log = Log(__name__)
+
+
+def _wait_futures_with_health_check(
+    futures, io_monitor=None, poll_timeout_s=2.0, total_timeout_s=3600
+):
+    """Wait for futures while polling the I/O health monitor for critical failures."""
+    pending = set(futures)
+    deadline = monotonic() + total_timeout_s
+    while pending:
+        if io_monitor is not None:
+            io_monitor.raise_if_unhealthy()
+        if monotonic() >= deadline:
+            for future in list(pending):
+                future.cancel()
+            raise TimeoutError(
+                f"NFS I/O operations did not complete within {total_timeout_s}s "
+                f"({len(pending)} task(s) still pending)"
+            )
+        done, pending = wait(
+            pending,
+            timeout=poll_timeout_s,
+            return_when=FIRST_COMPLETED,
+        )
+        for future in done:
+            future.result()
 
 
 def create_export_and_mount_for_existing_nfs_cluster(
@@ -37,6 +66,7 @@ def create_export_and_mount_for_existing_nfs_cluster(
     ha=False,
     vip=None,
     nfs_server=None,
+    chown_cephuser=False,
     **kwargs,
 ):
     """
@@ -55,8 +85,44 @@ def create_export_and_mount_for_existing_nfs_cluster(
         ha: High availability flag
         vip: Virtual IP for HA
         nfs_server: NFS server address(es)
-        kwargs: Additional arguments for export creation
+        kwargs: Additional arguments for export creation (e.g. enctag, xprtsec).
+            Export-only keys are used by ``nfs export create``; mount-relevant
+            keys in ``MOUNT_OPTS_KEYS`` (see export_mount_kwargs) are forwarded.
     """
+    upgrade_kwargs = pop_upgrade_kwargs(kwargs)
+    installer_node = upgrade_kwargs["installer_node"]
+    during_upgrade = upgrade_kwargs["during_upgrade"]
+    nfs_wait_timeout = upgrade_kwargs["nfs_wait_timeout"]
+    mount_timeout = upgrade_kwargs["mount_timeout"]
+    mount_tries = upgrade_kwargs["mount_tries"]
+
+    def _do_mount(client, mount_name, mount_version, mount_port, server, export_name):
+        mount_opts = mount_opts_from_kwargs(kwargs, chown_cephuser=chown_cephuser)
+        if during_upgrade:
+            return wait_for_nfs_and_mount(
+                client,
+                mount_name,
+                mount_version,
+                mount_port,
+                server,
+                export_name,
+                installer_node=installer_node,
+                nfs_name=nfs_name,
+                nfs_wait_timeout=nfs_wait_timeout,
+                mount_timeout=mount_timeout,
+                mount_tries=mount_tries,
+                **mount_opts,
+            )
+        return mount_retry(
+            client=client,
+            mount_name=mount_name,
+            version=mount_version,
+            port=mount_port,
+            nfs_server=server,
+            export_name=export_name,
+            **mount_opts,
+        )
+
     # Detect multi-cluster mode
     if isinstance(nfs_name, list):
         num_clusters = len(nfs_name)
@@ -146,14 +212,13 @@ def create_export_and_mount_for_existing_nfs_cluster(
                         _cluster_nfs_server = vip.split("/")[0]  # Remove the port
                     for mount_version, _clients in mount_versions.items():
                         _clients[client_num].create_dirs(dir_path=mount_name, sudo=True)
-                        if not mount_retry(
-                            client=_clients[client_num],
-                            mount_name=mount_name,
-                            version=mount_version,
-                            port=_port,
-                            nfs_server=_cluster_nfs_server,
-                            export_name=export_name,
-                            **kwargs,
+                        if not _do_mount(
+                            _clients[client_num],
+                            mount_name,
+                            mount_version,
+                            _port,
+                            _cluster_nfs_server,
+                            export_name,
                         ):
                             log.info(f"Mount failed, {mount_name}")
                             raise OperationFailedError(
@@ -196,17 +261,16 @@ def create_export_and_mount_for_existing_nfs_cluster(
             # If list, only mount on first nfs_server for single cluster for backward compatibility
             _nfs_server = nfs_server[0] if isinstance(nfs_server, list) else nfs_server
             if ha:
-                _nfs_server = vip.split("/")
+                _nfs_server = vip.split("/")[0]
             for mount_version, _clients in mount_versions.items():
                 _clients[client_num].create_dirs(dir_path=mount_name, sudo=True)
-                if not mount_retry(
-                    client=_clients[client_num],
-                    mount_name=mount_name,
-                    version=mount_version,
-                    port=port,
-                    nfs_server=_nfs_server,
-                    export_name=export_name,
-                    **kwargs,
+                if not _do_mount(
+                    _clients[client_num],
+                    mount_name,
+                    mount_version,
+                    port,
+                    _nfs_server,
+                    export_name,
                 ):
                     log.info(f"Mount failed, {mount_name}")
                     raise OperationFailedError(
@@ -223,6 +287,8 @@ def perform_io_operations_in_loop(
     file_count,
     dd_command_size_in_M,
     multicluster=False,
+    sudo=True,
+    io_monitor=None,
 ):
     """
     Perform IO operations on mounted NFS exports for single or multiple clusters.
@@ -234,16 +300,27 @@ def perform_io_operations_in_loop(
         file_count (int): Number of files to create for each operation
         dd_command_size_in_M (int): Size in MB for dd command operations
         multicluster (bool): Whether this is a multi-cluster operation
+        io_monitor: Optional NFS I/O health monitor; fails the test on stale mounts
     """
     file_name = "created_during_upgrade_file"
     renamed_file_name = "re_renamed_during_upgrade_file"
+
+    def _run_io_batch(submit):
+        """Run one IO batch and return even if a worker is still blocked in NFS."""
+        executor = ThreadPoolExecutor(max_workers=None)
+        futures = []
+        try:
+            submit(executor, futures)
+            _wait_futures_with_health_check(futures, io_monitor=io_monitor)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _process_single_cluster(mount_dict):
         """Helper function to process IO for a single cluster's mounts"""
         # Create files
         log.info(f"Creating {file_count} files on each mount point")
-        with ThreadPoolExecutor(max_workers=None) as executor:
-            futures = []
+
+        def _submit_creates(executor, futures):
             for client in clients:
                 for mount in mount_dict[client]["mount"]:
                     for i in range(file_count):
@@ -253,16 +330,17 @@ def perform_io_operations_in_loop(
                                 client,
                                 mount,
                                 f"{file_name}_{i}",
+                                sudo,
                             )
                         )
-            for future in futures:
-                future.result()
+
+        _run_io_batch(_submit_creates)
         log.info("File creation completed")
 
         # Write to files using dd
         log.info(f"Writing {dd_command_size_in_M}M to each file")
-        with ThreadPoolExecutor(max_workers=None) as executor:
-            futures = []
+
+        def _submit_writes(executor, futures):
             for client in clients:
                 for mount in mount_dict[client]["mount"]:
                     for i in range(file_count):
@@ -273,16 +351,17 @@ def perform_io_operations_in_loop(
                                 mount,
                                 f"{file_name}_{i}",
                                 dd_command_size_in_M,
+                                sudo,
                             )
                         )
-            for future in futures:
-                future.result()
+
+        _run_io_batch(_submit_writes)
         log.info("Write operations completed")
 
         # Read from files using dd
         log.info("Reading back written files")
-        with ThreadPoolExecutor(max_workers=None) as executor:
-            futures = []
+
+        def _submit_reads(executor, futures):
             for client in clients:
                 for mount in mount_dict[client]["mount"]:
                     for i in range(file_count):
@@ -293,16 +372,17 @@ def perform_io_operations_in_loop(
                                 mount,
                                 f"{file_name}_{i}",
                                 dd_command_size_in_M,
+                                sudo,
                             )
                         )
-            for future in futures:
-                future.result()
+
+        _run_io_batch(_submit_reads)
         log.info("Read operations completed")
 
         # Rename files
         log.info("Renaming all files")
-        with ThreadPoolExecutor(max_workers=None) as executor:
-            futures = []
+
+        def _submit_renames(executor, futures):
             for client in clients:
                 for mount in mount_dict[client]["mount"]:
                     for i in range(file_count):
@@ -313,16 +393,17 @@ def perform_io_operations_in_loop(
                                 mount,
                                 f"{file_name}_{i}",
                                 f"{renamed_file_name}_{i}",
+                                sudo,
                             )
                         )
-            for future in futures:
-                future.result()
+
+        _run_io_batch(_submit_renames)
         log.info("Rename operations completed")
 
         # Delete files
         log.info("Deleting all files")
-        with ThreadPoolExecutor(max_workers=None) as executor:
-            futures = []
+
+        def _submit_deletes(executor, futures):
             for client in clients:
                 for mount in mount_dict[client]["mount"]:
                     for i in range(file_count):
@@ -332,10 +413,11 @@ def perform_io_operations_in_loop(
                                 client,
                                 mount,
                                 f"{renamed_file_name}_{i}",
+                                sudo,
                             )
                         )
-            for future in futures:
-                future.result()
+
+        _run_io_batch(_submit_deletes)
         log.info("Delete operations completed")
 
     if multicluster:
@@ -350,7 +432,9 @@ def perform_io_operations_in_loop(
         log.info("Completed all IO operations")
 
 
-def remove_exports_and_unmount(client_export_mount_dict, clients, nfs_name):
+def remove_exports_and_unmount(
+    client_export_mount_dict, clients, nfs_name, cleanup_timeout=600
+):
     """
     Unmounts the NFS exports and removes them from the NFS cluster.
 
@@ -358,7 +442,7 @@ def remove_exports_and_unmount(client_export_mount_dict, clients, nfs_name):
         client_export_mount_dict (dict): Dictionary containing client export and mount information.
         clients (list): List of client nodes.
     """
-    timeout, interval = 600, 10
+    timeout, interval = cleanup_timeout, 10
     for client_num in range(len(clients)):
         for export_num in range(
             len(client_export_mount_dict[clients[client_num]]["export"])
@@ -425,6 +509,14 @@ def run(ceph_cluster, **kw):
     export_num = config.get("exports_number", 1)
     ha = bool(config.get("ha", False))
     vip = config.get("vip", None)
+    sudo = bool(config.get("sudo", True))
+    cleanup_timeout = config.get("cleanup_timeout", 600)
+    nfs_wait_timeout = config.get("nfs_wait_timeout", 300)
+    mount_timeout = config.get("mount_timeout", 120)
+    mount_tries = config.get("mount_tries", 2)
+    installer_node = ceph_cluster.get_nodes("installer")[0]
+    io_monitor = None
+    result = 0
 
     # If the setup doesn't have required number of clients, exit.
     if no_clients > len(clients):
@@ -432,12 +524,32 @@ def run(ceph_cluster, **kw):
 
     clients = clients[:no_clients]
     client = clients[0]  # Select only the required number of clients
+    rados_obj, start_time = init_cluster_health_check(ceph_cluster, config)
 
     # 1. pick the existing NFS cluster
     nfs_cluster_name = Ceph(client).nfs.cluster.ls()[0]
     nfs_hostname = Ceph(client).nfs.cluster.info(nfs_cluster_name)[nfs_cluster_name][
         "backend"
     ][0]["hostname"]
+    nfs_export_base = f"/export/nfs_{nfs_cluster_name}"
+    nfs_mount_base = f"/mnt/nfs_{nfs_cluster_name}"
+
+    # Opt-in only: ``io_health_monitor: true`` in suite YAML (default off).
+    from tests.nfs.nfs_io_health_monitor import (
+        NfsIoHealthSlaBreached,
+        NfsIoStaleMountError,
+        NfsIoStallFailedError,
+        create_paused_upgrade_io_monitor,
+    )
+
+    io_monitor = create_paused_upgrade_io_monitor(
+        config,
+        clients,
+        sudo=sudo,
+        run_config=kw.get("run_config"),
+    )
+    heartbeat_finalize_reason = "upgrade_io_complete"
+
     try:
         for l in range(loop_count):
             log.info(
@@ -447,10 +559,11 @@ def run(ceph_cluster, **kw):
 
             # 2. create multiple exports
             # 3. mount to clients
+            # Non-root IO (sudo: false) needs mount ownership for cephuser.
             client_export_mount_dict = create_export_and_mount_for_existing_nfs_cluster(
                 clients,
-                f"/export/nfs_{nfs_cluster_name}",
-                f"/mnt/nfs_{nfs_cluster_name}",
+                nfs_export_base,
+                nfs_mount_base,
                 export_num,
                 fs_name="cephfs",
                 nfs_name=nfs_cluster_name,
@@ -460,7 +573,31 @@ def run(ceph_cluster, **kw):
                 ha=ha,
                 nfs_server=nfs_hostname,
                 vip=vip,
+                chown_cephuser=not sudo,
+                installer_node=installer_node,
+                during_upgrade=True,
+                nfs_wait_timeout=nfs_wait_timeout,
+                mount_timeout=mount_timeout,
+                mount_tries=mount_tries,
             )
+
+            if io_monitor is not None:
+                from tests.nfs.nfs_io_health_monitor import (
+                    refresh_cluster_mount_targets,
+                )
+
+                mount_count = refresh_cluster_mount_targets(
+                    io_monitor,
+                    clients,
+                    sudo=sudo,
+                    client_export_mount_dict=client_export_mount_dict,
+                )
+                log.info(
+                    "NFS I/O health monitor probing %d mount(s) in cluster",
+                    mount_count,
+                )
+                io_monitor.ensure_heartbeats_initialized()
+                io_monitor.resume()
 
             # 4. perform Create, read, rename, copy, read/write using DD command and deletion
             perform_io_operations_in_loop(
@@ -468,14 +605,68 @@ def run(ceph_cluster, **kw):
                 clients,
                 file_count,
                 dd_command_size_in_M,
+                sudo=sudo,
+                io_monitor=io_monitor,
             )
+
+            if io_monitor is not None:
+                io_monitor.pause()
 
             # 5. unmount + delete exports
             log.info("Unmounting and deleting exports")
             remove_exports_and_unmount(
-                client_export_mount_dict, clients, nfs_cluster_name
+                client_export_mount_dict,
+                clients,
+                nfs_cluster_name,
+                cleanup_timeout=cleanup_timeout,
             )
-        return 0
+
+    except NfsIoStaleMountError as e:
+        log.error("Stale NFS mount detected — marking test failed: %s", e)
+        heartbeat_finalize_reason = "upgrade_io_stale_mount"
+        result = 1
+    except (NfsIoStallFailedError, NfsIoHealthSlaBreached) as e:
+        log.error("NFS I/O health SLA breached — marking test failed: %s", e)
+        heartbeat_finalize_reason = "upgrade_io_health_failure"
+        result = 1
     except Exception as e:
-        log.error(f"An error occurred during NFS IO operations: {e}")
-        raise OperationFailedError(f"NFS IO operations failed: {e}")
+        log.error("An error occurred during NFS IO operations: %s", e)
+        heartbeat_finalize_reason = "upgrade_io_error"
+        if (
+            io_monitor is not None
+            and io_monitor.is_running
+            and not io_monitor.is_paused
+        ):
+            log.error(
+                "NFS upgrade IO failed while heartbeat monitor was active; "
+                "capturing heartbeat status before exit"
+            )
+        result = 1
+    finally:
+        from tests.nfs.nfs_io_health_monitor import finalize_upgrade_io_monitor
+
+        if io_monitor is not None:
+            try:
+                finalize_upgrade_io_monitor(
+                    io_monitor,
+                    reason=heartbeat_finalize_reason,
+                )
+            except (
+                NfsIoStaleMountError,
+                NfsIoStallFailedError,
+                NfsIoHealthSlaBreached,
+            ) as err:
+                log.error("NFS I/O health monitor reported failure: %s", err)
+                result = 1
+            except Exception as err:
+                log.warning("Failed to finalize NFS I/O health monitor: %s", err)
+        if log_cluster_health_and_check_crashes(rados_obj, start_time):
+            result = 1
+    if result == 0:
+        log.info(
+            "TEST PASSED - NFS upgrade IO with health monitor completed "
+            "(loops=%d, exports=%d)",
+            loop_count,
+            export_num,
+        )
+    return result

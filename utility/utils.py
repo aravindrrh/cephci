@@ -54,6 +54,8 @@ magna_server = "http://magna002.ceph.redhat.com"
 magna_url = f"{magna_server}/cephci-jenkins/"
 magna_rhcs_artifacts = f"{magna_server}/cephci-jenkins/latest-rhceph-container-info/"
 KAFKA_HOME = "/usr/local/kafka"
+GKLM_HOME = "/usr/local/gklm"
+GKLM_CONFIGS_DIR = "/home/cephuser/configs/rgw/gklm"
 MANIFEST_URL = (
     "https://raw.githubusercontent.com/ibmstorage/qe-ceph-manifest/refs/heads/main/"
 )
@@ -613,21 +615,33 @@ def set_config_param(node):
 
 def kernel_mount(mounting_dir, mon_node_ip, kernel_clients):
     try:
+        from utility.odf_defaults import (
+            format_mons_for_kernel_mount,
+            is_msgr1_disabled,
+            kernel_ms_mode_opt,
+        )
+
         for client in kernel_clients:
             out, err = client.exec_command(
                 cmd="sudo ceph auth get-key client.%s" % (client.hostname)
             )
             secret_key = out.rstrip("\n")
             mon_node_ip = mon_node_ip.replace(" ", "")
+            use_msgr2 = is_msgr1_disabled(client)
+            mons = format_mons_for_kernel_mount(mon_node_ip, use_msgr2)
+            ms_opt = kernel_ms_mode_opt(use_msgr2)
             client.exec_command(
-                cmd="sudo mount -t ceph %s:6789:/ %s -o name=%s,secret=%s"
-                % (mon_node_ip, mounting_dir, client.hostname, secret_key)
+                cmd="sudo mount -t ceph %s:/ %s -o name=%s,secret=%s%s"
+                % (mons, mounting_dir, client.hostname, secret_key, ms_opt)
             )
             out, err = client.exec_command(cmd="mount")
             mount_output = out.split()
 
             log.info("Checking if kernel mount is is passed of failed:")
-            if "%s:6789:/" % (mon_node_ip) in mount_output:
+            # Device may be bare IP:port or IP:3300 after msgr2 adjust
+            if any(mounting_dir.rstrip("/") == m for m in mount_output) or any(
+                mons in m for m in mount_output
+            ):
                 log.info("kernel mount passed")
             else:
                 log.error("kernel mount failed")
@@ -1499,6 +1513,11 @@ def generate_self_signed_certificate(subject: Dict) -> Tuple:
                 [
                     x509.DNSName(f"*.{subject['common_name']}"),
                     x509.DNSName(subject["common_name"]),
+                    *[
+                        x509.DNSName(name)
+                        for name in subject.get("extra_dns_names", [])
+                        if name and name != subject["common_name"]
+                    ],
                     x509.IPAddress(ip_address(subject["ip_address"])),
                 ]
             ),
@@ -1688,6 +1707,11 @@ def check_build_overrides(
 
 def install_start_kafka(rgw_node, cloud_type):
     """Install kafka package and start zookeeper and kafka services."""
+    rgw_node.exec_command(
+        sudo=True,
+        cmd="java -version || yum install -y https://download.oracle.com/java/25/latest/jdk-25_linux-x64_bin.rpm",
+        long_running=True,
+    )
     install_kafka(rgw_node, cloud_type)
     start_kafka(rgw_node)
 
@@ -1748,35 +1772,33 @@ def start_kafka_broker(rgw_node):
     )
 
 
-def configure_kafka_security(rgw_node, cloud_type):
+def configure_kafka_security(ceph_cluster, cloud_type):
     """Configure kafka security and restart zookeeper and kafka services."""
-    setup_server_properties_security_configs(rgw_node, cloud_type)
-    setup_keystore_certs(rgw_node, cloud_type)
-    stop_kafka(rgw_node)
-    start_kafka(rgw_node)
-    add_kafka_config_for_user(rgw_node)
+    rgw_nodes = ceph_cluster.get_ceph_objects("rgw")
+    rgw_node1_obj = rgw_nodes[0]
+    rgw_node1 = rgw_node1_obj.node
+    setup_server_properties_security_configs(rgw_node1, cloud_type)
+    setup_keystore_certs(rgw_node1, cloud_type)
+    stop_kafka(rgw_node1)
+    start_kafka(rgw_node1)
+    add_kafka_config_for_user(rgw_node1)
 
     # copy kafka ssl certificate to all rgw nodes to be used for authentication while pushing notification
-    rgw_node.exec_command(sudo=True, cmd="sudo yum install -y sshpass")
-    rgw_hosts_out, _ = rgw_node.exec_command(
-        sudo=True, cmd="ceph orch host ls --label rgw --format json"
-    )
-    log.info(rgw_hosts_out)
-    rgw_hosts_out_json = json.loads(rgw_hosts_out)
-    for rgw_host in rgw_hosts_out_json:
-        ip = rgw_host["addr"]
+    for rgw_node_obj in rgw_nodes:
+        rgw_node = rgw_node_obj.node
         rgw_node.exec_command(
             sudo=True,
-            cmd=f"sshpass -p 'passwd' ssh -o StrictHostKeyChecking=no root@{ip} 'mkdir -p /usr/local/kafka/'",
+            cmd="mkdir -p /usr/local/kafka/",
         )
-        rgw_node.exec_command(
-            sudo=True,
-            cmd="sshpass -p 'passwd'"
-            + f" scp -o StrictHostKeyChecking=no /usr/local/kafka/y-ca.crt root@{ip}:/usr/local/kafka",
+        copy_file_from_node_to_node(
+            src_file="/usr/local/kafka/y-ca.crt",
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file="/usr/local/kafka/y-ca.crt",
         )
 
     # redeploy rgw service so that kafka certs are mounted to rgw container to be used for authentication
-    redeploy_rgw_service_for_kafka_security(rgw_node)
+    redeploy_rgw_service_for_kafka_security(rgw_node1)
 
 
 def setup_server_properties_security_configs(rgw_node, cloud_type):
@@ -1971,36 +1993,66 @@ def configure_kafka_cluster_with_security(ceph_cluster, cloud_type):
     broker_id = (
         1  # broker_id is by default 0, so from node2 onwards broker_id starts from 1
     )
-    rgw_node1.exec_command(sudo=True, cmd="sudo yum install -y sshpass")
     for rgw_node_obj in rgw_nodes:
         rgw_node = rgw_node_obj.node
         rgw_node_ip = rgw_node.ip_address
         # copy configured server.properties and zookeeper.properties from rgw node1 to current rgw mode
-        rgw_node1.exec_command(
-            sudo=True,
-            cmd="sshpass -p 'passwd'"
-            + f" scp -o StrictHostKeyChecking=no {KAFKA_HOME}/config/zookeeper.properties"
-            + f" root@{rgw_node_ip}:{KAFKA_HOME}/config/zookeeper.properties",
+        zookeeper_properties_filename = f"{KAFKA_HOME}/config/zookeeper.properties"
+        copy_file_from_node_to_node(
+            src_file=zookeeper_properties_filename,
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file=zookeeper_properties_filename,
         )
-        rgw_node1.exec_command(
-            sudo=True,
-            cmd="sshpass -p 'passwd'"
-            + f" scp -o StrictHostKeyChecking=no {KAFKA_HOME}/config/server.properties"
-            + f" root@{rgw_node_ip}:{KAFKA_HOME}/config/server.properties",
+        server_properties_filename = f"{KAFKA_HOME}/config/server.properties"
+        copy_file_from_node_to_node(
+            src_file=server_properties_filename,
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file=server_properties_filename,
         )
-
         # copy keystore, truststore and certs used for kafka security to other rgw node
-        rgw_node1.exec_command(
-            sudo=True,
-            cmd="sshpass -p 'passwd'"
-            + f" scp -o StrictHostKeyChecking=no server.truststore.jks server.keystore.jks  root@{rgw_node_ip}:~/",
+        copy_file_from_node_to_node(
+            src_file="/root/server.truststore.jks",
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file="/root/server.truststore.jks",
         )
-        rgw_node1.exec_command(
-            sudo=True,
-            cmd="sshpass -p 'passwd'"
-            + f" scp -o StrictHostKeyChecking=no {KAFKA_HOME}/localhost.crt {KAFKA_HOME}/localhost.req"
-            + f" {KAFKA_HOME}/y-ca.crt  {KAFKA_HOME}/y-ca.key {KAFKA_HOME}/y-ca.srl"
-            + f" root@{rgw_node_ip}:/usr/local/kafka/",
+        copy_file_from_node_to_node(
+            src_file="/root/server.keystore.jks",
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file="/root/server.keystore.jks",
+        )
+        copy_file_from_node_to_node(
+            src_file=f"{KAFKA_HOME}/localhost.crt",
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file=f"{KAFKA_HOME}/localhost.crt",
+        )
+        copy_file_from_node_to_node(
+            src_file=f"{KAFKA_HOME}/localhost.req",
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file=f"{KAFKA_HOME}/localhost.req",
+        )
+        copy_file_from_node_to_node(
+            src_file=f"{KAFKA_HOME}/y-ca.crt",
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file=f"{KAFKA_HOME}/y-ca.crt",
+        )
+        copy_file_from_node_to_node(
+            src_file=f"{KAFKA_HOME}/y-ca.key",
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file=f"{KAFKA_HOME}/y-ca.key",
+        )
+        copy_file_from_node_to_node(
+            src_file=f"{KAFKA_HOME}/y-ca.srl",
+            src_node=rgw_node1,
+            dest_node=rgw_node,
+            dest_file=f"{KAFKA_HOME}/y-ca.srl",
         )
         # overwrite broker_id from 0 to current broker_id
         rgw_node.exec_command(
@@ -2038,18 +2090,16 @@ def configure_kafka_cluster_with_security(ceph_cluster, cloud_type):
     redeploy_rgw_service_for_kafka_security(rgw_node1)
 
 
-def config_keystone_ldap(rgw_node, cloud_type):
-    """Set the keystone config option on the cluster at startup"""
+def config_keystone(rgw_node, client_node, cloud_type):
+    """Set the keystone config option on the cluster at startup and run deploy_keystone_on_client.sh"""
     cephci_config = get_cephci_config()
     keystone_cfg = cephci_config.get("keystone", {})
     ldap_cfg = cephci_config.get("ldap", {})
     # OneCloud may share keystone/ldap with openstack; fallback if onecloud not configured
     lookup = cloud_type if cloud_type in keystone_cfg else "openstack"
-    keystone_server = keystone_cfg.get(lookup, keystone_cfg.get("openstack", {})).get(
-        "url"
-    )
+
     ldap_url = ldap_cfg.get(lookup, ldap_cfg.get("openstack", {})).get("url")
-    if not keystone_server or not ldap_url:
+    if not ldap_url:
         raise ConfigError(
             f"keystone/ldap config missing for cloud_type '{cloud_type}'. "
             "Add keystone.{cloud} and ldap.{cloud} to cephci config."
@@ -2059,13 +2109,129 @@ def config_keystone_ldap(rgw_node, cloud_type):
     rgw_name = out[0].split()[0]
     rgw_node.exec_command(
         sudo=True,
+        cmd=f"ceph config set client.{rgw_name} rgw_ldap_uri {ldap_url}",
+    )
+
+    # Get deploy_keystone_on_client.sh from the rgw_configs repo and run it
+    clone_configs_repo(client_node, "rgw_configs")
+    final_repo_path = "/home/cephuser/configs/"
+    keystone_path = "/home/cephuser/configs/rgw/keystone/"
+
+    # Path to the deploy_keystone_on_client.sh script in the repo
+    script_path = os.path.join(
+        final_repo_path, "rgw", "keystone", "deploy_keystone_on_client.sh"
+    )
+
+    try:
+        # Read the script from the local repo
+        # Make the script executable and run it
+        client_node.exec_command(sudo=True, cmd="pip install podman-compose")
+        client_node.exec_command(
+            sudo=True, cmd="pip install python-openstackclient python-swiftclient"
+        )
+        client_node.exec_command(sudo=True, cmd=f"chmod +x {script_path}")
+        client_node.exec_command(sudo=True, cmd=f"{script_path} {keystone_path}")
+        log.info(
+            "Successfully deployed keystone on client using deploy_keystone_on_client.sh"
+        )
+    except BaseException as be:
+        log.debug(f"Failed to run deploy_keystone_on_client.sh: {be}")
+
+    client_ip = client_node.ip_address
+    keystone_server = f"http://{client_ip}:15000"
+    rgw_node.exec_command(
+        sudo=True,
         cmd=f"ceph config set client.{rgw_name} rgw_keystone_url {keystone_server}",
     )
+    # Restart rgw service and wait for it to come up
+    restart_rgw_and_wait(rgw_node, rgw_name)
+
+
+def config_ldap(rgw_node, client_node, cloud_type, config=None):
+    """Deploy RHDS on the client node and configure RGW LDAP authentication.
+
+    Mirrors config_keystone(): run deploy_rhds_on_client.sh on the client,
+    point RGW at ldap://<client_ip>:389, then restart RGW.
+    Optional ~/.cephci.yaml keys:
+      ldap.image: container image (e.g. quay.io/389ds/dirsrv:latest)
+    """
+    config = config or {}
+    cephci_config = get_cephci_config()
+    ldap_cfg = cephci_config.get("ldap", {})
+    lookup = cloud_type if cloud_type in ldap_cfg else "openstack"
+    ldap_cloud_cfg = ldap_cfg.get(lookup, ldap_cfg.get("openstack", {}))
+    ldap_image = ldap_cfg.get("image") or ldap_cloud_cfg.get("image")
+    yaml_ldap_url = ldap_cloud_cfg.get("url")
+
+    out = rgw_node.exec_command(sudo=True, cmd="ceph orch ls | grep rgw")
+    rgw_name = out[0].split()[0]
+    client_ip = client_node.ip_address
+    ldap_url = yaml_ldap_url
+
+    clone_configs_repo(client_node, "rgw_configs")
+    ldap_path = "/home/cephuser/configs/rgw/ldap/"
+    ldap_script = os.path.join(ldap_path, "deploy_rhds_on_client.sh")
+    ldap_script_candidates = [
+        ldap_script,
+        "/root/rgw-tests/ceph-qe-scripts/utility/deploy_rhds_on_client.sh",
+        "/home/cephuser/rgw-tests/ceph-qe-scripts/utility/deploy_rhds_on_client.sh",
+        "/root/rhds-src/deploy_rhds_on_client.sh",
+    ]
+    ldap_src = None
+    for candidate in ldap_script_candidates:
+        found, _ = client_node.exec_command(
+            sudo=True,
+            cmd=f"test -f {candidate} && echo found || true",
+            check_ec=False,
+        )
+        if found and "found" in str(found):
+            ldap_src = os.path.dirname(candidate)
+            ldap_script = candidate
+            break
+
+    if ldap_src is None:
+        git_url = config.get(
+            "git-url", "https://github.com/red-hat-storage/ceph-qe-scripts.git"
+        )
+        branch = config.get("branch", "master")
+        dest = "/home/cephuser/rgw-tests"
+        repo_path = f"{dest}/ceph-qe-scripts"
+        log.info(f"Cloning {git_url} ({branch}) onto client for RHDS scripts")
+        client_node.exec_command(sudo=True, cmd=f"mkdir -p {dest}")
+        client_node.exec_command(
+            sudo=True,
+            cmd=f"test -e {repo_path} || git clone {git_url} -b {branch} {repo_path}",
+        )
+        ldap_src = f"{repo_path}/utility"
+        ldap_script = f"{ldap_src}/deploy_rhds_on_client.sh"
+
+    try:
+        client_node.exec_command(sudo=True, cmd="pip install podman-compose")
+        client_node.exec_command(
+            sudo=True, cmd=f"chmod +x {ldap_script} {ldap_src}/init-rhds.sh"
+        )
+        env_prefix = f"LDAP_IMAGE={ldap_image} " if ldap_image else ""
+        client_node.exec_command(
+            sudo=True,
+            cmd=f"{env_prefix}{ldap_script} {ldap_src} {client_ip} --configure-rgw",
+            long_running=True,
+        )
+        log.info("Successfully deployed RHDS on client using deploy_rhds_on_client.sh")
+        ldap_url = f"ldap://{client_ip}:389"
+    except BaseException as be:
+        log.debug(f"Failed to run deploy_rhds_on_client.sh: {be}")
+
+    if not ldap_url:
+        raise ConfigError(
+            f"ldap config missing for cloud_type '{cloud_type}'. "
+            "Add ldap.{cloud}.url to cephci config, or ensure "
+            "deploy_rhds_on_client.sh is available on the client."
+        )
+
     rgw_node.exec_command(
         sudo=True,
         cmd=f"ceph config set client.{rgw_name} rgw_ldap_uri {ldap_url}",
     )
-    # Restart rgw service and wait for it to come up
     restart_rgw_and_wait(rgw_node, rgw_name)
 
 
@@ -2348,6 +2514,10 @@ def run_fio(**fio_args):
         log.info("No runtime provided.")
     elif run_time:
         cmd_args.update({"runtime": run_time, "time_based": True})
+        # fio requires --size with --time_based so it knows the working set;
+        # without it fio writes indefinitely and never honours --runtime.
+        if not cmd_args.get("size"):
+            cmd_args["size"] = "100%"
 
     if fio_args.get("rwmixread"):
         cmd_args.update({"rwmixread": fio_args["rwmixread"]})
@@ -2370,11 +2540,12 @@ def run_fio(**fio_args):
             "numjobs": fio_args.get("num_jobs", "1"),
             "rw": fio_args.get("io_type", "write"),
             "iodepth": fio_args.get("iodepth", "8"),
-            "fsync": fio_args.get("fsync", "32"),
             "group_reporting": True,
             "bs": fio_args.get("bs", "4k"),
         }
     )
+    if fio_args.get("fsync"):
+        cmd_args["fsync"] = fio_args["fsync"]
 
     output_fmt = fio_args.get("output_format")
     if output_fmt:
@@ -2772,18 +2943,80 @@ def log_json_dump(data):
 
 
 def get_registry_info(registry):
-    """Get Registry details from cephci configuration yaml file.
+    """Get registry entry from the host-keyed ``registries`` section.
 
     Args:
-        registry: registry name
+        registry: Registry hostname (e.g. ``cp.icr.io``, ``preprod.icr.io``).
+
+    Returns:
+        dict with at least username/password (``user`` is accepted as an alias
+        for ``username``). Optional keys: ``product``, ``production``.
+
+    Raises:
+        KeyError: when ``registries`` is missing or ``registry`` is not listed.
     """
+    if not registry:
+        raise KeyError("Registry host is required")
     try:
-        __regs = get_cephci_config()["registries"]
-        return __regs[registry]
+        regs = get_cephci_config()["registries"]
+        info = regs[registry]
     except KeyError:
         raise KeyError(
-            "CephCI configuration yaml file does not have 'registries' section"
+            f"CephCI configuration has no registries entry for {registry!r}. "
+            "Add it under the top-level 'registries:' section in ~/.cephci.yaml."
         )
+    if not isinstance(info, dict):
+        raise KeyError(f"Invalid registries entry for {registry!r}")
+    # Normalize user/username from template variants
+    username = info.get("username") or info.get("user")
+    password = info.get("password")
+    if not username or not password:
+        raise KeyError(
+            f"registries[{registry!r}] must include username/user and password"
+        )
+    normalized = dict(info)
+    normalized["username"] = username
+    normalized["password"] = password
+    return normalized
+
+
+def registry_host_from_image(image):
+    """Return registry host from a container image reference."""
+    if not image or not isinstance(image, str):
+        return None
+    host = image.split("/")[0]
+    return host or None
+
+
+def resolve_registry_host(
+    overrides=None, image=None, explicit=None, key="bootstrap-registry"
+):
+    """
+    Resolve which registry host to authenticate against.
+
+    Preference: ``explicit`` > ``overrides[key]`` > image hostname.
+    """
+    if explicit:
+        return explicit
+    overrides = overrides or {}
+    if isinstance(overrides, dict) and overrides.get(key):
+        return overrides[key]
+    return registry_host_from_image(image)
+
+
+def resolve_registry_login(registry_host):
+    """
+    Resolve cephadm/podman login args for a registry host.
+
+    Returns:
+        dict: registry-url, registry-username, registry-password
+    """
+    info = get_registry_info(registry_host)
+    return {
+        "registry-url": registry_host,
+        "registry-username": info["username"],
+        "registry-password": info["password"],
+    }
 
 
 def is_unsecured_registry(test_data):
@@ -2850,61 +3083,44 @@ def restart_rgw_and_wait(rgw_node, rgw_service_name):
         log.info("RGW daemons are up and running")
 
 
-def setup_gklm_prereq(ceph_cluster, cloud_type, custom_config):
+def setup_gklm_prereq(ceph_cluster, cloud_type):
     """setup GKLM authentication certs on the rgw nodes, redeploy rgw to mounted gklm certs path
     and set ceph configs for sse-kms-kmip"""
     log.info("setting up GKLM prerequisites")
     rgw_nodes = ceph_cluster.get_ceph_objects("rgw")
-    gklm_auth_cert_path_remote = "/usr/local/gklm/rgwselfsigned.cert"
-    gklm_auth_key_path_remote = "/usr/local/gklm/rgwselfsigned.key"
-    gklm_auth_cert_path_local = None
-    gklm_auth_key_path_local = None
-    gklm_endpoint_openstack = None
-    gklm_endpoint_ibmc = None
-
-    for config_item in custom_config:
-        key, value = config_item.split("=")
-        if key == "gklm-auth-cert-path":
-            gklm_auth_cert_path_local = value.strip()
-        if key == "gklm-auth-key-path":
-            gklm_auth_key_path_local = value.strip()
-        if key == "gklm-endpoint-openstack":
-            gklm_endpoint_openstack = value.strip()
-        if key == "gklm-endpoint-ibmc":
-            gklm_endpoint_ibmc = value.strip()
-
-    if gklm_auth_cert_path_local is None:
+    gklm_auth_cert_path_remote = f"{GKLM_HOME}/rgwselfsigned.cert"
+    gklm_auth_key_path_remote = f"{GKLM_HOME}/rgwselfsigned.key"
+    cp_cert_cmd = (
+        f"cp {GKLM_CONFIGS_DIR}/rgwselfsigned.cert {gklm_auth_cert_path_remote}"
+    )
+    cp_key_cmd = f"cp {GKLM_CONFIGS_DIR}/rgwselfsigned.key {gklm_auth_key_path_remote}"
+    endpoint_files = {
+        "openstack": f"{GKLM_CONFIGS_DIR}/gklm_endpoint_openstack",
+        "ibmc": f"{GKLM_CONFIGS_DIR}/gklm_endpoint_ibmc",
+    }
+    if cloud_type not in endpoint_files:
         raise GKLMSetupError(
-            "gklm-auth-cert-path not passed as custom-config which is required for gklm tests prerequisites"
+            f"unsupported cloud_type {cloud_type!r} for GKLM tests; "
+            "expected openstack or ibmc"
         )
-    if gklm_auth_key_path_local is None:
-        raise GKLMSetupError(
-            "gklm-auth-cert-path not passed as custom-config which is required for gklm tests prerequisites"
-        )
-    if gklm_endpoint_openstack is None or gklm_endpoint_ibmc is None:
-        raise GKLMSetupError(
-            "gklm-endpoint not passed as custom-config which is required for gklm tests prerequisites"
-        )
+    endpoint_file = endpoint_files[cloud_type]
 
     for rgw_node_obj in rgw_nodes:
         rgw_node = rgw_node_obj.node
         log.info(f"setting up auth certs on node {rgw_node.ip_address}")
-        rgw_node.exec_command(sudo=True, cmd="mkdir -p /usr/local/gklm")
-        # copy gklm_auth_cert
+        rgw_node.exec_command(sudo=True, cmd=f"mkdir -p {GKLM_HOME}")
         log.info(
-            f"copying local file '{gklm_auth_cert_path_local}' to remote file '{gklm_auth_cert_path_remote}'. "
-            + f"remote node ip: {rgw_node.ip_address}"
+            f"copying GKLM cert/key from configs repo to {GKLM_HOME} on node "
+            f"{rgw_node.ip_address}"
         )
-        rgw_node.upload_file(
-            sudo=True, src=gklm_auth_cert_path_local, dst=gklm_auth_cert_path_remote
-        )
-        # copy gklm_auth_key
-        log.info(
-            f"copying local file '{gklm_auth_key_path_local}' to remote file '{gklm_auth_key_path_remote}'. "
-            + f"remote node ip: {rgw_node.ip_address}"
-        )
-        rgw_node.upload_file(
-            sudo=True, src=gklm_auth_key_path_local, dst=gklm_auth_key_path_remote
+        rgw_node.exec_command(sudo=True, cmd=f"{cp_cert_cmd} && {cp_key_cmd}")
+
+    gklm_endpoint, _ = rgw_nodes[0].node.exec_command(cmd=f"cat {endpoint_file}")
+    gklm_endpoint = gklm_endpoint.strip()
+    if not gklm_endpoint:
+        raise GKLMSetupError(
+            f"GKLM endpoint not found in {endpoint_file} on node "
+            f"{rgw_nodes[0].node.ip_address}"
         )
 
     # set ceph configs for kmip
@@ -2917,30 +3133,16 @@ def setup_gklm_prereq(ceph_cluster, cloud_type, custom_config):
     )
     client_node.exec_command(
         sudo=True,
-        cmd="ceph config set client.rgw rgw_crypt_kmip_client_cert /usr/local/gklm/rgwselfsigned.cert",
+        cmd=f"ceph config set client.rgw rgw_crypt_kmip_client_cert {gklm_auth_cert_path_remote}",
     )
     client_node.exec_command(
         sudo=True,
-        cmd="ceph config set client.rgw rgw_crypt_kmip_client_key /usr/local/gklm/rgwselfsigned.key",
+        cmd=f"ceph config set client.rgw rgw_crypt_kmip_client_key {gklm_auth_key_path_remote}",
     )
-    if cloud_type == "openstack":
-        if gklm_endpoint_openstack is None:
-            raise GKLMSetupError(
-                "gklm-endpoint-openstack not passed as custom-config which is required for gklm tests prerequisites"
-            )
-        client_node.exec_command(
-            sudo=True,
-            cmd=f"ceph config set client.rgw rgw_crypt_kmip_addr {gklm_endpoint_openstack}:5696",
-        )
-    elif cloud_type == "ibmc":
-        if gklm_endpoint_ibmc is None:
-            raise GKLMSetupError(
-                "gklm-endpoint-ibmc not passed as custom-config which is required for gklm tests prerequisites"
-            )
-        client_node.exec_command(
-            sudo=True,
-            cmd=f"ceph config set client.rgw rgw_crypt_kmip_addr {gklm_endpoint_ibmc}:5696",
-        )
+    client_node.exec_command(
+        sudo=True,
+        cmd=f"ceph config set client.rgw rgw_crypt_kmip_addr {gklm_endpoint}:5696",
+    )
 
     # redeploy rgw to mount gklm certs path to rgw container
     client_node.exec_command(
@@ -2997,3 +3199,55 @@ def extract_ceph_version(text: str) -> str:
     match = re.search(r"\d+\.\d+\.\d+", text)
 
     return match.group() if match else ""
+
+
+def copy_file_from_node_to_node(src_file, src_node, dest_node, dest_file):
+    """
+    Copies file from one node to another node
+
+    :param src_file: filename to be copied
+    :param src_node: node to be copied from
+    :param dest_node: node to copied to
+    :param dest_file: destination filename
+
+    """
+    log.info(f"copying {src_file} from {src_node.ip_address} to {dest_node.ip_address}")
+    src_file_obj = read_file_from_node(src_file, src_node)
+    write_file_to_node(src_file_obj, dest_file, dest_node)
+
+
+def read_file_from_node(file_name, node):
+    """
+    read file_name from node and returns
+    remote_file object
+
+    :param file_name: file_name to read
+    :param node: ceph node
+    :return: remote file object
+    """
+
+    log.info(f"reading {file_name} from {node.ip_address}")
+    try:
+        file_obj = node.remote_file(
+            sudo=True, file_name=file_name, file_mode="r"
+        ).read()
+
+        return file_obj
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"file to read is missing here: {file_name}")
+
+
+def write_file_to_node(file_obj, file_name, node):
+    """
+    write to file from ceph node using remote_file obj
+    :param file_obj: remote_file object
+    :param file_name: destination file name
+    :param node: ceph node to write
+
+    """
+
+    log.info(f"write to {file_name} in node: {node.ip_address}")
+    dest_file_obj = node.remote_file(sudo=True, file_name=file_name, file_mode="w")
+    dest_file_obj.write(file_obj)
+    dest_file_obj.flush()

@@ -232,6 +232,7 @@ tests:
       module: sanity_rgw_multisite.py
       config:
         run-on-rgw: true
+        git_clone_configs_repo: true
         configure_kafka_cluster_with_security: true
         script-name: test_bucket_notifications.py
         config-file-name: test_bucket_notification_kafka_broker_multipart.yaml

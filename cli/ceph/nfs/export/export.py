@@ -1,3 +1,5 @@
+import json
+
 from cli import Cli
 from cli.utilities.utils import build_cmd_from_args
 from utility.log import Log
@@ -36,6 +38,7 @@ class Export(Cli):
             readonly (Boolean) : enable readonly on export
             squash (str) : value to squash
             client-addr (str) : Authorized client hostname/IP
+            cmount_path: If set, pass --cmount_path using the subvol getpath
         """
         # Step 1: Check if the subvolume group is present.If not, create subvolume group
         cmd = "ceph fs subvolumegroup ls cephfs"
@@ -48,8 +51,11 @@ class Export(Cli):
 
         enctag = kwargs.get("enctag", None)
         xprtsec = kwargs.get("xprtsec", None)
-        # NFS-export-only options must not be passed to ``fs subvolume create``; doing so
-        # can break ``subvolume getpath`` (empty path) and yields ``ceph nfs export create
+        sectype = kwargs.get("sectype", None)
+        cmount_path = kwargs.get("cmount_path", None)
+        # NFS-export-only options (``sectype``, ``xprtsec``, ``cmount_path``, etc.)
+        # must not be passed to ``fs subvolume create``; doing so can break
+        # ``subvolume getpath`` (empty path) and yields ``ceph nfs export create
         # ... --path=`` which makes Ganesha reject mounts (e.g. ENOENT / No such file).
         subvol_kwargs = {k: v for k, v in kwargs.items() if k in ("enctag")}
 
@@ -83,6 +89,12 @@ class Export(Cli):
             cmd = f"{cmd} --kmip_key_id={enctag}"
         if xprtsec:
             cmd += f" --xprtsec {xprtsec}"
+        if sectype:
+            flavors = sectype if isinstance(sectype, (list, tuple)) else [sectype]
+            for flavor in flavors:
+                cmd += f" --sectype={flavor}"
+        if cmount_path:
+            cmd += f" --cmount_path={path}"
         if readonly:
             cmd += " --readonly"
         if squash:
@@ -133,6 +145,26 @@ class Export(Cli):
         if isinstance(out, tuple):
             return out[0].strip()
         return out
+
+    def info(self, nfs_name, nfs_export):
+        """
+        Get detailed info for a specific NFS export (equivalent to
+        ``ceph nfs export info <cluster> <pseudo-path>``).
+
+        Args:
+            nfs_name (str): NFS cluster name
+            nfs_export (str): export pseudo-path (e.g. /export_0)
+
+        Returns:
+            dict: parsed JSON export configuration
+        """
+        cmd = f"{self.base_cmd} info {nfs_name} {nfs_export} --format json"
+        out = self.execute(sudo=True, cmd=cmd)
+        raw = out[0].strip() if isinstance(out, tuple) else out
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
 
     def ls(self, nfs_name=None, **kwargs):
         """

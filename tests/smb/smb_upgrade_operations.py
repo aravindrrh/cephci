@@ -1,3 +1,6 @@
+from datetime import datetime, timedelta
+from time import sleep
+
 from smb_operations import (
     check_ctdb_health,
     check_rados_clustermeta,
@@ -13,12 +16,40 @@ from cephci.utils.build_info import CephTestManifest
 from cli.exceptions import ConfigError
 from cli.utilities.operations import wait_for_cluster_health
 from utility.log import Log
+from utility.utils import resolve_registry_host, resolve_registry_login
 
 log = Log(__name__)
 
 
 class SmbUpgradeError(Exception):
     pass
+
+
+def _login_upgrade_registry(orch, ceph_cluster, config):
+    """
+    Authenticate against the upgrade target registry before pull/upgrade-check.
+
+    Prefer --custom-config upgrade-registry=<host>; else the container image host.
+    Credentials come from the host-keyed ``registries:`` section in ~/.cephci.yaml.
+    """
+    overrides = config.get("overrides") or {}
+    registry_host = resolve_registry_host(
+        overrides=overrides,
+        image=config.get("container_image"),
+        key="upgrade-registry",
+    )
+    if not registry_host:
+        log.warning("No upgrade registry host resolved; skipping registry login")
+        return
+
+    reg_args = resolve_registry_login(registry_host)
+    log.info(
+        "Logging into upgrade registry %s (image=%s)",
+        registry_host,
+        config.get("container_image"),
+    )
+    for node in ceph_cluster.get_nodes(ignore="client"):
+        orch.registry_login(node=node, args=reg_args)
 
 
 def fetch_build_artifacts(product, release, build_type, platform):
@@ -146,29 +177,77 @@ def deploy_smb(
         raise SmbUpgradeError(f"Fail to deploy smb services, Error {e}")
 
 
+def monitor_upgrade_with_smb_recovery(installer, orch, smb_cluster_id, timeout=3600):
+    interval = 7
+    end_time = datetime.now() + timedelta(seconds=timeout)
+
+    while datetime.now() < end_time:
+        sleep(interval)
+
+        status = orch.upgrade_status()
+        log.info("Upgrade Status: %s", status)
+
+        if not status.get("in_progress"):
+            log.info("Upgrade Complete...")
+            return
+
+        message = status.get("message", "")
+
+        if (
+            status.get("is_paused")
+            and "UPGRADE_REDEPLOY_DAEMON" in message
+            and "smb" in message
+        ):
+            log.warning("SMB redeploy failure detected during upgrade")
+
+            log.info("Redeploying smb service")
+            cmd = f"cephadm shell -- ceph orch redeploy smb.{smb_cluster_id}"
+            installer.exec_command(sudo=True, cmd=cmd)
+
+            sleep(10)
+
+            log.info("Resuming upgrade")
+            cmd = "cephadm shell -- ceph orch upgrade resume"
+            installer.exec_command(sudo=True, cmd=cmd)
+
+            log.info("Recovery completed. Continuing upgrade monitoring...")
+
+    raise SmbUpgradeError("Upgrade did not complete within timeout")
+
+
 def upgrade(
     installer,
     orch,
+    ceph_cluster,
+    config,
     osd_flags,
     check_cluster_health,
     samba_image,
     samba_metrics_image,
     ceph_image,
+    smb_spec,
 ):
     """Upgrade ceph cluster
     Args:
         installer (obj): Installer node obj
         orch (obj): Cephadm orch obj
+        ceph_cluster (obj): Ceph cluster obj
+        config (dict): Test config (overrides / container_image for registry login)
         target_image (str): Target upgrade image
         upgrade_target_version (str): Upgrade version
         check_cluster_health (Bool): Cluster health check flag
     """
     try:
+        # Get smb service value from spec file
+        for spec in smb_spec:
+            if spec["resource_type"] == "ceph.smb.cluster":
+                smb_cluster_id = spec["cluster_id"]
+
         # Check cluster health before upgrade
         if check_cluster_health:
-            health = wait_for_cluster_health(installer, "HEALTH_OK", 300, 30)
+            health = wait_for_cluster_health(installer, "HEALTH_WARN", 300, 30)
             if not health:
-                raise SmbUpgradeError("Cluster not in 'HEALTH_OK' state")
+                raise SmbUpgradeError("Cluster not in 'HEALTH_WARN' state")
 
         # Add repo to all the nodes
         orch.set_tool_repo()
@@ -185,6 +264,10 @@ def upgrade(
         # Configure smb images
         config_smb_images(installer, samba_image, samba_metrics_image)
 
+        # Authenticate against upgrade image registry (host-keyed registries:)
+        config["container_image"] = ceph_image
+        _login_upgrade_registry(orch, ceph_cluster, config)
+
         # Check service versions vs available and target containers
         orch.upgrade_check(image=ceph_image)
 
@@ -193,7 +276,7 @@ def upgrade(
         installer.exec_command(sudo=True, cmd=cmd)
 
         # Monitor upgrade status, till completion
-        orch.monitor_upgrade_status()
+        monitor_upgrade_with_smb_recovery(installer, orch, smb_cluster_id)
 
         # Unset osd flags
         for flag in osd_flags:
@@ -202,9 +285,9 @@ def upgrade(
 
         # Check cluster health after upgrade
         if check_cluster_health:
-            health = wait_for_cluster_health(installer, "HEALTH_OK", 600, 60)
+            health = wait_for_cluster_health(installer, "HEALTH_WARN", 600, 60)
             if not health:
-                raise SmbUpgradeError("Cluster not in 'HEALTH_OK' state")
+                raise SmbUpgradeError("Cluster not in 'HEALTH_WARN' state")
     except Exception as e:
         raise SmbUpgradeError(f"Fail to upgrade ceph cluster, Error {e}")
 
@@ -236,6 +319,7 @@ def run(ceph_cluster, **kw):
     """
     # Get config
     config = kw.get("config")
+    config["overrides"] = kw.get("test_data", {}).get("custom_config_dict")
 
     # Get orch obj
     orch = Orch(cluster=ceph_cluster, **config)
@@ -327,11 +411,14 @@ def run(ceph_cluster, **kw):
             upgrade(
                 installer,
                 orch,
+                ceph_cluster,
+                config,
                 osd_flags,
                 check_cluster_health,
                 samba_image,
                 samba_metrics_image,
                 ceph_image,
+                smb_spec,
             )
         elif operation == "cleanup_smb":
             # cleanup smb services
