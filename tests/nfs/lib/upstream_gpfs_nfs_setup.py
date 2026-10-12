@@ -611,9 +611,7 @@ GANESHA_STATE_DIRS = (
     "/var/lib/nfs/ganesha",
 )
 GANESHA_LOG_PATHS = (
-    "/var/log/ganesha.log",
-    "/var/log/ganesha/ganesha.log",
-    "/var/log/ganesha",
+    "/var/log/ganesha*",
 )
 
 
