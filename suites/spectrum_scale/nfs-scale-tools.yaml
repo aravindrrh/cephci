@@ -251,17 +251,6 @@ tests:
         port: "2049"
 
   - test:
-      name: Spectrum Scale NFS cleanup
-      module: upstream_nfs_cleanup.py
-      desc: Uninstall Ganesha RPMs, remove clones (Scale preserved by default)
-      abort-on-fail: false
-      timeout: 7200
-      config:
-        clients: 2
-        scale_fs: scale_volume
-        nfs_export: /ibm/scale_volume/export1
-
-  - test:
       name: NFS Ganesha 5k export scale
       module: upstream_nfs_export_scale.py
       desc: Create/load 5k Scale exports, mount all, dd on 100 random mounts, cleanup
@@ -271,7 +260,7 @@ tests:
         skip_deployment: true
         clients: 1
         scale_fs: scale_volume
-        num_exports: 5000
+        num_exports: 10000
         io_sample_count: 100
         dd_count_mb: 10
         nfs_version: "3"
@@ -280,3 +269,14 @@ tests:
         export_conf: export10k.conf
         cmd_timeout: 14400
         suite_cleanup: true
+
+  - test:
+      name: Spectrum Scale NFS cleanup
+      module: upstream_nfs_cleanup.py
+      desc: Uninstall Ganesha RPMs, remove clones (Scale preserved by default)
+      abort-on-fail: false
+      timeout: 7200
+      config:
+        clients: 2
+        scale_fs: scale_volume
+        nfs_export: /ibm/scale_volume/export1
