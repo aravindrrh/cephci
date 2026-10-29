@@ -1,0 +1,37 @@
+#===============================================================================================
+# Full combined upstream NFS / Spectrum Scale suite.
+#
+# Single multi-node deploy; each test skips redeploy and cleans up NFS mounts
+# (rm -rf + umount) before the next test runs.
+#
+# Conf: conf/spectrum_scale/spectrum_scale_2node.yaml (installer + 2 clients)
+#
+# DEBUG: passing tests commented out for faster iteration. PJDFS skipped (open
+# bug — EPERM on nfsnobody chmod). Active: Deploy, Lock test, SPECstorage, Pynfs.
+# Deploy is kept (required when skip_deployment: true).
+#===============================================================================================
+tests:
+  # - test:
+  #     name: Spectrum Scale multi-node deploy
+  #     module: upstream_nfs_deploy.py
+  #     desc: Deploy Scale / NFS once for the combined suite
+  #     abort-on-fail: true
+  #     timeout: 14400
+  #     config:
+  #       clients: 2
+  #       nfs_export: /ibm/scale_volume/export1
+  #       scale_installer_source: nfs_share
+  #       # scale_nfs_share_path: optional; defaults to Daily/latest under /mnt/gpfs_builds
+
+  - test:
+      name: Cthon multiclient
+      module: upstream_nfs_cthon_multiclient.py
+      desc: Parallel cthon on all Scale NFS clients
+      abort-on-fail: false
+      timeout: 14400
+      config:
+        skip_deployment: true
+        clients: 2
+        nfs_export: /ibm/scale_volume/export1
+        nfs_version: "4.0"
+        iterations: 10
