@@ -27,9 +27,9 @@ DEFAULT_NSD_FILE = "/home/nsd1_scale_filedisk"
 DEFAULT_NSD_SIZE_MB = 8192
 # fstab-mounted build share on the installer node (node0).
 DEFAULT_SCALE_NFS_INSTALLER = (
-    "/mnt/gpfs_builds/u/images/SPECTRUM_SCALE/6.0.2/Spectrum_Scale_Product/"
+    "/mnt/gpfs_builds/u/images/SPECTRUM_SCALE/6.0.3/Spectrum_Scale_Product/"
     "GA_Distribution/SE_Packages/Daily/latest/x86_64/"
-    "Storage_Scale_Developer-6.0.2.0-x86_64-Linux-install"
+    "Storage_Scale_Developer-6.0.3.0-x86_64-Linux-install"
 )
 # Written when deploy reuses an existing Scale cluster (same VERSION_TO_USE).
 SCALE_REUSE_MARKER = "/root/.cephci_scale_reuse"
