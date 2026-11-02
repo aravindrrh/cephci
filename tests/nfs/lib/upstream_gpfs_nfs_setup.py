@@ -233,6 +233,7 @@ def deploy_gpfs_scale(ceph_cluster, config=None):
         "ganesha_node": ganesha_node,
     }
 
+    conf.setdefault("skip_scale", True)
     if conf.get("skip_scale"):
         log.info("skip_scale set — skipping Spectrum Scale deploy")
         clear_scale_reuse_marker(installer)
