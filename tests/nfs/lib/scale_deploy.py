@@ -606,8 +606,8 @@ def deploy_spectrum_scale(ceph_cluster, config=None):
     )
     ss(f"spectrumscale config protocols -f {scale_fs} -m /ibm/{scale_fs}")
     ss("spectrumscale enable nfs")
-    ss("spectrumscale enable smb")
-    ss("spectrumscale callhome disable")
+    # ss("spectrumscale enable smb")
+    # ss("spectrumscale callhome disable")
     ss("spectrumscale config perfmon -r off")
     ss("spectrumscale node list")
 

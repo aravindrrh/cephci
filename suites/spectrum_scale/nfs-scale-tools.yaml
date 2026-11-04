@@ -33,16 +33,29 @@ tests:
         skip_deployment: true
         clients: 2
         nfs_export: /ibm/scale_volume/export1
+  # - test:
+  #     name: Cthon
+  #     module: upstream_nfs_cthon.py
+  #     desc: Cthon tests on Scale-backed NFS
+  #     abort-on-fail: false
+  #     timeout: 7200
+  #     config:
+  #       skip_deployment: true
+  #       clients: 2
+  #       nfs_export: /ibm/scale_volume/export1
+
   - test:
-      name: Cthon
-      module: upstream_nfs_cthon.py
-      desc: Cthon tests on Scale-backed NFS
+      name: Cthon multiclient - 100 iterations
+      module: upstream_nfs_cthon_multiclient.py
+      desc: Parallel cthon on all Scale NFS clients
       abort-on-fail: false
-      timeout: 7200
+      timeout: 14400
       config:
         skip_deployment: true
         clients: 2
         nfs_export: /ibm/scale_volume/export1
+        nfs_version: "4.0"
+        iterations: 100
   - test:
       name: FIO
       module: upstream_nfs_fio.py
@@ -251,9 +264,9 @@ tests:
         port: "2049"
 
   - test:
-      name: NFS Ganesha 5k export scale
+      name: NFS Ganesha 10k export scale
       module: upstream_nfs_export_scale.py
-      desc: Create/load 5k Scale exports, mount all, dd on 100 random mounts, cleanup
+      desc: Create/load 10k Scale exports, mount all, dd on 100 random mounts, cleanup
       abort-on-fail: false
       timeout: 28800
       config:
