@@ -106,7 +106,7 @@ tests:
       abort-on-fail: false
       config:
         nfs_version: 4.2
-        clients: 1
+        clients: 4
         iterations: 50
 
   - test:
