@@ -176,6 +176,7 @@ def _restore_ces_exports_conf(server, exports_conf, backup_path, timeout):
     _run(
         server,
         f"test -f {shlex.quote(backup_path)} && "
+        f"/usr/lpp/mmfs/bin/mmccr fput gpfs.ganesha.exports.conf {shlex.quote(backup_path)} && "
         f"cp -a {shlex.quote(backup_path)} {shlex.quote(exports_conf)}",
         timeout=timeout,
     )
