@@ -196,18 +196,19 @@ tests:
       name: PJDFS
       module: upstream_nfs_pjdfs.py
       desc: pjdfstest on NFSv3 and NFSv4 mounts
+      comments: Known Bug - IBMCEPH-13445
       abort-on-fail: false
       timeout: 14400
       config:
         skip_deployment: true
         clients: 2
         nfs_export: /ibm/scale_volume/export1
-        comments: Known Bug - IBMCEPH-13445
 
   - test:
       name: ganesha_mgr Tier1 functional
       module: test_ganesha_mgr_tier1.py
       desc: Tier-1 ganesha_mgr coverage on Scale CES NFS (exports/clients/cache/logs/condlog/grace/trim)
+      comments: Known Bug - IBMCEPH-21064
       abort-on-fail: false
       timeout: 7200
       config:
@@ -219,7 +220,6 @@ tests:
         port: "2049"
         enable_dbus_export_mutate: true
         enable_shutdown: false
-        comments: Known Bug - IBMCEPH-21064
 
   # ACL modules assume Scale+Ganesha+export1 already up (no acl_deploy).
   # Placed late so Ganesha restart inside functional has less impact on tools.
