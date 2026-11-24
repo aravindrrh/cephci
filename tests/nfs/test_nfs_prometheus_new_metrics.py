@@ -8,7 +8,10 @@ Polarion requirement: CEPH-83633129
 Per-TC Polarion IDs: CEPH-83633131 … CEPH-83633148 (NEW-0…7, NOM-0…5, REG-1…4).
 
 Suite YAML sets ``config.polarion-id`` to one of those IDs (one suite entry per TC).
-Metric names resolve via aliases for both legacy and ``nfs_``-prefixed forms.
+
+Workload / presence checks may resolve legacy and ``nfs_``-prefixed forms via
+aliases. Nomenclature mode detection and rename acceptance use **exact** scraped
+names only (no alias cross-wiring).
 """
 
 from __future__ import annotations
@@ -28,11 +31,11 @@ from tests.nfs.nfs_prometheus_stats_utils import (
     delete_exports,
     firewall_allow_port,
     firewall_remove_port,
-    get_counter_total,
     get_installer,
     get_monitoring_port,
     get_nfs_container_id,
     metric_available,
+    metric_exact_available,
     mount_export,
     parse_metric_samples,
     parse_prometheus_metrics,
@@ -432,23 +435,31 @@ def test_new_0(ctx):
     absent_core = [m for m in absent if m in NEW_METRIC_CORE]
     absent_inode = [m for m in absent if m in NEW_METRIC_INODE]
     if absent_core:
-        if ctx.config.get("require_new_metrics", False):
+        if _config_flag(ctx.config, "require_new_metrics", False):
             raise OperationFailedError(
                 "NEW-0: required core NEW metrics missing: %s" % absent_core
             )
-        log.warning(
-            "NEW-0: core feature incomplete (absent=%s); NEW-1…4/6/7 will SKIP",
-            absent_core,
+        raise TestNotSupported(
+            "NEW-0: core feature incomplete (absent=%s); "
+            "NEW-1…7 will SKIP via feature gate" % absent_core
         )
-        return
     if absent_inode:
-        log.warning(
-            "NEW-0: inode gauges absent (%s); NEW-5 will SKIP, "
-            "capacity/uptime cases still run",
-            absent_inode,
-        )
+        # Soft gate for later NEW-5, but do not Polarion-Pass an incomplete
+        # six-family probe unless explicitly opted in.
+        if _config_flag(ctx.config, "new0_allow_partial_pass", False):
+            log.warning(
+                "NEW-0: inode gauges absent (%s); partial Pass allowed by config; "
+                "NEW-5 will SKIP",
+                absent_inode,
+            )
+        else:
+            raise TestNotSupported(
+                "NEW-0 incomplete: core present but inode gauges absent (%s); "
+                "NEW-5 will SKIP; set new0_allow_partial_pass to Pass on "
+                "capacity-only builds" % (absent_inode,)
+            )
     log.info(
-        "NEW-0: PASS — core families present (inode_present=%s)",
+        "NEW-0: PASS — core+inode families present (inode_present=%s)",
         ctx.inode_metrics_present,
     )
 
@@ -543,7 +554,7 @@ def test_new_4(ctx):
             t0,
             t1,
         )
-        if ctx.config.get("new4_require_stable_total", False):
+        if _config_flag(ctx.config, "new4_require_stable_total", False):
             raise OperationFailedError("total_size not stable across fill")
 
     ctx.client.exec_command(sudo=True, cmd="rm -f %s; sync" % fill_path)
@@ -557,7 +568,7 @@ def test_new_4(ctx):
             break
     if not recovered:
         log.warning("NEW-4: reclaim did not raise available within retry window")
-        if ctx.config.get("new4_require_reclaim", True):
+        if _config_flag(ctx.config, "new4_require_reclaim", True):
             raise OperationFailedError("available_size did not recover after delete")
     log.info("NEW-4: PASS (recovered=%s)", recovered)
 
@@ -585,7 +596,7 @@ def test_new_5(ctx):
     log.info("files %s->%s inode_util %s->%s", f0, f1, i0, i1)
     if f0 < 0 or f1 < 0:
         # Known CephFS f_favail=-1 behavior
-        if ctx.config.get("waive_cephfs_inode_unsupported", True):
+        if _config_flag(ctx.config, "waive_cephfs_inode_unsupported", True):
             raise TestNotSupported(
                 "CephFS reports available_file_count=%s (unsupported inode free); "
                 "inode_util %s->%s" % (f0 if f0 < 0 else f1, i0, i1)
@@ -667,23 +678,87 @@ def test_new_7(ctx):
         log.info(
             "expA %s->%s (d=%s); expB %s->%s (d=%s)", a1_0, a1_1, d1, a2_0, a2_1, d2
         )
-        # Shared CephFS pool: both may drop; require distinct series + A delta >= 0
+        # Distinct per-export series + write-on-A must decrease A.
         if d1 < 0:
             raise OperationFailedError("export A available increased after write on A")
-        log.info(
-            "NEW-7: PASS (distinct series; shared-pool deltas may correlate "
-            "d1=%s d2=%s)",
-            d1,
-            d2,
+        if d1 == 0:
+            raise OperationFailedError(
+                "export A available_size unchanged after write on A (d1=0)"
+            )
+        # Prove attribution: A must move beyond noise, and either B stays
+        # near-stable or |d1-d2| exceeds noise. Shared CephFS pools often move
+        # both equally — that is N/A, not Pass. b_stable alone with a tiny d1
+        # is not enough (gauge lag / noise).
+        noise = float(ctx.config.get("new7_delta_noise_bytes", 1024 * 1024))
+        rel_tol = float(ctx.config.get("new7_delta_rel_tol", 0.05))
+        abs_diff = abs(d1 - d2)
+        a_moved = d1 > noise
+        b_stable = abs(d2) <= noise
+        asymmetric = abs_diff > max(noise, rel_tol * max(abs(d1), abs(d2), 1.0))
+        if a_moved and (b_stable or asymmetric):
+            log.info(
+                "NEW-7: PASS (attribution ok; a_moved=%s b_stable=%s asymmetric=%s "
+                "d1=%s d2=%s abs_diff=%s noise=%s)",
+                a_moved,
+                b_stable,
+                asymmetric,
+                d1,
+                d2,
+                abs_diff,
+                noise,
+            )
+            return
+        if _config_flag(ctx.config, "new7_allow_shared_pool_pass", False):
+            log.warning(
+                "NEW-7: correlated/noisy deltas on shared pool (d1=%s d2=%s); "
+                "Pass allowed by new7_allow_shared_pool_pass",
+                d1,
+                d2,
+            )
+            return
+        raise TestNotSupported(
+            "NEW-7: cannot prove per-export attribution "
+            "(d1=%s d2=%s abs_diff=%s a_moved=%s b_stable=%s asymmetric=%s); "
+            "shared CephFS pool or gauge lag likely; set "
+            "new7_allow_shared_pool_pass to Pass anyway"
+            % (d1, d2, abs_diff, a_moved, b_stable, asymmetric)
         )
     finally:
         # Shared-suite mode: drop ephemeral export so later TCs stay clean.
         ctx.cleanup_extras()
 
 
+# Exact-name nomenclature keys (never resolve via aliases for mode detect).
+# New mdcache form is nfs_mdcache_* only — mdcache_misses_total is transitional
+# shorthand, not rename acceptance.
+_NOM_MDCACHE_LEGACY = ("mdcache_cache_misses_total", "mdcache_cache_hits_total")
+_NOM_MDCACHE_NEW = (
+    "nfs_mdcache_misses_total",
+    "nfs_mdcache_hits_total",
+)
+_NOM_V4_LEGACY = ("nfsv4__op_count",)
+_NOM_V4_NEW = ("nfs_v4_op_count",)
+_NOM_PREFIX_NEW = (
+    "nfs_mdcache_misses_total",
+    "nfs_mdcache_hits_total",
+    "nfs_v4_op_count",
+    "nfs_requests_total",
+)
+_NOM_PREFIX_LEGACY = (
+    "mdcache_cache_misses_total",
+    "mdcache_cache_hits_total",
+    "nfsv4__op_count",
+)
+# Canonical dual-audit pairs (exact names both required for NOM-4 Pass).
+_NOM_MDCACHE_DUAL_PAIR = ("mdcache_cache_misses_total", "nfs_mdcache_misses_total")
+_NOM_MDCACHE_DUAL_HITS_PAIR = ("mdcache_cache_hits_total", "nfs_mdcache_hits_total")
+_NOM_V4_DUAL_PAIR = ("nfsv4__op_count", "nfs_v4_op_count")
+
+
 def _detect_mode(names, legacy_keys, new_keys):
-    has_legacy = any(metric_available(names, k) for k in legacy_keys)
-    has_new = any(metric_available(names, k) for k in new_keys)
+    """Classify nomenclature using exact scraped names only (no alias cross-wire)."""
+    has_legacy = any(metric_exact_available(names, k) for k in legacy_keys)
+    has_new = any(metric_exact_available(names, k) for k in new_keys)
     if has_legacy and has_new:
         return "dual"
     if has_new:
@@ -693,27 +768,29 @@ def _detect_mode(names, legacy_keys, new_keys):
     return "absent"
 
 
+def _detect_prefix_mode(names):
+    """nfs_ rename mode from nomenclature-critical exact names (not any nfs_*)."""
+    return _detect_mode(names, _NOM_PREFIX_LEGACY, _NOM_PREFIX_NEW)
+
+
+def _require_exact_new_names(names, new_keys, tc_id, family):
+    """Rename/migration TCs must see at least one exact new-form name."""
+    if any(metric_exact_available(names, k) for k in new_keys):
+        return
+    raise TestNotSupported(
+        "%s: %s counters moved but exact new-form names absent (%s); "
+        "legacy-only build cannot green rename acceptance"
+        % (tc_id, family, ", ".join(new_keys))
+    )
+
+
 def test_nom_0(ctx):
-    log.info("NOM-0: nomenclature mode detection")
+    log.info("NOM-0: nomenclature mode detection (exact names)")
     names = parse_prometheus_metrics(ctx.scrape())
     modes = {
-        "mdcache": _detect_mode(
-            names,
-            ("mdcache_cache_misses_total", "mdcache_cache_hits_total"),
-            (
-                "nfs_mdcache_misses_total",
-                "nfs_mdcache_hits_total",
-                "mdcache_misses_total",
-            ),
-        ),
-        "nfs_v4": _detect_mode(
-            names,
-            ("nfsv4__op_count",),
-            ("nfs_v4_op_count",),
-        ),
-        "nfs_prefix": (
-            "new-only" if any(n.startswith("nfs_") for n in names) else "legacy-only"
-        ),
+        "mdcache": _detect_mode(names, _NOM_MDCACHE_LEGACY, _NOM_MDCACHE_NEW),
+        "nfs_v4": _detect_mode(names, _NOM_V4_LEGACY, _NOM_V4_NEW),
+        "nfs_prefix": _detect_prefix_mode(names),
     }
     ctx.nomenclature_mode = modes
     log.info("NOM-0 modes: %s", modes)
@@ -723,7 +800,7 @@ def test_nom_0(ctx):
 
 
 def test_nom_1(ctx):
-    log.info("NOM-1: mdcache counters move under workload")
+    log.info("NOM-1: mdcache counters move under workload (require new-form names)")
     before = ctx.scrape()
     perform_f10_mdcache_workload(
         ctx.client,
@@ -733,6 +810,11 @@ def test_nom_1(ctx):
     time.sleep(2)
     after = ctx.scrape()
     verify_mdcache_counters_increased(before, after)
+    names = parse_prometheus_metrics(after)
+    if _config_flag(ctx.config, "nom1_allow_legacy_only", False):
+        log.warning("NOM-1: nom1_allow_legacy_only set; skipping new-form check")
+    else:
+        _require_exact_new_names(names, _NOM_MDCACHE_NEW, "NOM-1", "mdcache")
     log.info("NOM-1: PASS")
 
 
@@ -743,8 +825,11 @@ def test_nom_2(ctx):
     # Standalone suite entries do not share NOM-0 state — detect mode live.
     if not ctx.nomenclature_mode:
         test_nom_0(ctx)
-    mode = (ctx.nomenclature_mode or {}).get("nfs_prefix", "unknown")
-    # requests family: product may ship nfs_requests_total OR rpcs_received_total
+    modes = ctx.nomenclature_mode or {}
+    mode = modes.get("nfs_prefix", "unknown")
+    mdcache_mode = modes.get("mdcache", "unknown")
+    v4_mode = modes.get("nfs_v4", "unknown")
+    # Family presence may use aliases (e.g. rpcs_received_total ≈ requests).
     critical = (
         "nfs_requests_total",
         "mdcache_cache_misses_total",
@@ -757,26 +842,55 @@ def test_nom_2(ctx):
             "NOM-2 critical families missing via aliases: %s (mode=%s); "
             "request/rpc sample=%s" % (missing, mode, sample)
         )
-    # On new-only builds, legacy mdcache_cache_ / nfsv4__ should be gone
-    if mode == "new-only" or (ctx.nomenclature_mode or {}).get("mdcache") == "new-only":
+    axes = (mdcache_mode, v4_mode, mode)
+    # Rename acceptance: when exact mode is new-only, require exact new names
+    # and report legacy leftovers honestly (forbid by default).
+    rename_new_only = "new-only" in axes
+    if rename_new_only:
+        if mdcache_mode == "new-only":
+            _require_exact_new_names(names, _NOM_MDCACHE_NEW, "NOM-2", "mdcache")
+        if v4_mode == "new-only":
+            _require_exact_new_names(names, _NOM_V4_NEW, "NOM-2", "nfs_v4")
+        if mode == "new-only" and mdcache_mode != "new-only" and v4_mode != "new-only":
+            # Prefix-only new-only (e.g. nfs_requests_total) — still require at
+            # least one exact renamed family marker among critical new keys.
+            _require_exact_new_names(
+                names, _NOM_PREFIX_NEW, "NOM-2", "nfs_prefix"
+            )
         legacy_left = [
             n
             for n in names
             if n.startswith("mdcache_cache_") or n.startswith("nfsv4__")
         ]
-        if legacy_left and ctx.config.get("nom2_forbid_legacy_on_new_only", False):
+        forbid = _config_flag(ctx.config, "nom2_forbid_legacy_on_new_only", True)
+        if legacy_left and forbid:
             raise OperationFailedError(
                 "NOM-2 new-only still exports legacy names: %s" % legacy_left[:10]
             )
         log.info(
-            "NOM-2 new-only: legacy leftover count=%s",
+            "NOM-2 new-only: legacy leftover count=%s (mdcache=%s nfs_v4=%s prefix=%s)",
             len(legacy_left),
+            mdcache_mode,
+            v4_mode,
+            mode,
         )
-    log.info("NOM-2: PASS (mode=%s)", mode)
+    elif "dual" not in axes and "legacy-only" in axes:
+        # Mixed absent + legacy-only must not green rename acceptance.
+        raise TestNotSupported(
+            "NOM-2: exact mode has no new-only/dual axis "
+            "(mdcache=%s nfs_v4=%s prefix=%s); rename acceptance N/A"
+            % (mdcache_mode, v4_mode, mode)
+        )
+    log.info(
+        "NOM-2: PASS (prefix=%s mdcache=%s nfs_v4=%s)",
+        mode,
+        mdcache_mode,
+        v4_mode,
+    )
 
 
 def test_nom_3(ctx):
-    log.info("NOM-3: nfs_v4 / nfsv4 op_count increases after R/W")
+    log.info("NOM-3: nfs_v4 op_count increases after R/W (require new-form names)")
     before = ctx.scrape()
     run_fio_rw(
         ctx.client,
@@ -788,41 +902,93 @@ def test_nom_3(ctx):
     time.sleep(2)
     after = ctx.scrape()
     verify_nfsv4_op_count_after_workload(before, after)
+    names = parse_prometheus_metrics(after)
+    if _config_flag(ctx.config, "nom3_allow_legacy_only", False):
+        log.warning("NOM-3: nom3_allow_legacy_only set; skipping new-form check")
+    else:
+        _require_exact_new_names(names, _NOM_V4_NEW, "NOM-3", "nfs_v4")
     log.info("NOM-3: PASS")
 
 
+def _exact_pair_present(names, pair):
+    return all(metric_exact_available(names, n) for n in pair)
+
+
+def _sum_exact(body, metric_name):
+    return sum(v for n, _, v in parse_metric_samples(body) if n == metric_name)
+
+
+def _assert_dual_pair_drift(body, legacy_name, new_name, tol_pct, label):
+    leg = _sum_exact(body, legacy_name)
+    neu = _sum_exact(body, new_name)
+    if leg <= 0:
+        raise TestNotSupported(
+            "NOM-4 dual %s pair has zero legacy total (%s)" % (label, legacy_name)
+        )
+    drift = abs(leg - neu) * 100.0 / leg
+    log.info(
+        "dual %s legacy=%s (%s) new=%s (%s) drift=%.2f%%",
+        label,
+        leg,
+        legacy_name,
+        neu,
+        new_name,
+        drift,
+    )
+    if drift > tol_pct:
+        raise OperationFailedError(
+            "dual %s totals diverge %.2f%% > %s%%" % (label, drift, tol_pct)
+        )
+
+
 def test_nom_4(ctx):
-    log.info("NOM-4: dual-mode consistency")
+    log.info("NOM-4: dual-mode consistency (exact dual pair required)")
     if not ctx.nomenclature_mode:
         test_nom_0(ctx)
     modes = ctx.nomenclature_mode or {}
-    if modes.get("mdcache") != "dual" and modes.get("nfs_v4") != "dual":
-        raise TestNotSupported("NOM-4 N/A — nomenclature mode is not dual (%s)" % modes)
     body = ctx.scrape()
     names = parse_prometheus_metrics(body)
-    if "nfs_mdcache_misses_total" in names and "mdcache_cache_misses_total" in names:
-        leg = sum(
-            v
-            for n, _, v in parse_metric_samples(body)
-            if n == "mdcache_cache_misses_total"
-        )
-        neu = sum(
-            v
-            for n, _, v in parse_metric_samples(body)
-            if n == "nfs_mdcache_misses_total"
-        )
-        tol = float(ctx.config.get("nom4_tolerance_pct", 5))
-        if leg <= 0:
-            raise TestNotSupported("NOM-4 dual pair has zero legacy miss total")
-        drift = abs(leg - neu) * 100.0 / leg
-        log.info("dual mdcache misses legacy=%s new=%s drift=%.2f%%", leg, neu, drift)
-        if drift > tol:
-            raise OperationFailedError(
-                "dual mdcache miss totals diverge %.2f%% > %s%%" % (drift, tol)
+    # Prefer exact pair presence over coarse mode==dual (avoids hits+misses
+    # cross-family false dual from _detect_mode OR semantics).
+    has_mdcache_pair = _exact_pair_present(names, _NOM_MDCACHE_DUAL_PAIR)
+    has_mdcache_hits_pair = _exact_pair_present(names, _NOM_MDCACHE_DUAL_HITS_PAIR)
+    has_v4_pair = _exact_pair_present(names, _NOM_V4_DUAL_PAIR)
+    if not has_mdcache_pair and not has_v4_pair:
+        if modes.get("mdcache") != "dual" and modes.get("nfs_v4") != "dual":
+            raise TestNotSupported(
+                "NOM-4 N/A — nomenclature mode is not dual and exact pairs "
+                "absent (%s)" % modes
             )
-    else:
-        legacy = get_counter_total(body, "mdcache_cache_misses_total")
-        log.info("NOM-4 dual theme present; alias sample legacy misses=%s", legacy)
+        raise TestNotSupported(
+            "NOM-4: mode reports dual but exact legacy+new name pairs absent "
+            "(mdcache_pair=%s v4_pair=%s modes=%s); refusing weak alias Pass"
+            % (has_mdcache_pair, has_v4_pair, modes)
+        )
+    tol = float(ctx.config.get("nom4_tolerance_pct", 5))
+    if has_mdcache_pair:
+        _assert_dual_pair_drift(
+            body,
+            _NOM_MDCACHE_DUAL_PAIR[0],
+            _NOM_MDCACHE_DUAL_PAIR[1],
+            tol,
+            "mdcache_misses",
+        )
+    if has_mdcache_hits_pair:
+        _assert_dual_pair_drift(
+            body,
+            _NOM_MDCACHE_DUAL_HITS_PAIR[0],
+            _NOM_MDCACHE_DUAL_HITS_PAIR[1],
+            tol,
+            "mdcache_hits",
+        )
+    if has_v4_pair:
+        _assert_dual_pair_drift(
+            body,
+            _NOM_V4_DUAL_PAIR[0],
+            _NOM_V4_DUAL_PAIR[1],
+            tol,
+            "nfs_v4_op_count",
+        )
     log.info("NOM-4: PASS")
 
 

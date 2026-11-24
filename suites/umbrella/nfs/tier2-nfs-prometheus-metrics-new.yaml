@@ -298,7 +298,9 @@ tests:
   - test:
       name: TC-PROM-NEW-0 Environment - feature gate
       module: test_nfs_prometheus_new_metrics.py
-      desc: Gate NEW metrics on scrape presence of six new metric families
+      desc: >
+        Gate NEW metrics — Pass only when core+inode families are present;
+        SKIP if incomplete (set new0_allow_partial_pass for capacity-only Pass)
       polarion-id: CEPH-83633131
       abort-on-fail: false
       config:
@@ -518,7 +520,9 @@ tests:
   - test:
       name: TC-PROM-NOM-2 nfs_ prefix consistency
       module: test_nfs_prometheus_new_metrics.py
-      desc: Critical families present via nfs_ / alias resolution
+      desc: >
+        Critical families present; new-only rename requires exact nfs_ names
+        and forbids legacy leftovers (nom2_forbid_legacy_on_new_only)
       polarion-id: CEPH-83633141
       abort-on-fail: false
       config:
@@ -535,12 +539,14 @@ tests:
         enable_dynamic_metrics: true
         setup_nfs: false
         cleanup_nfs: false
-        nom2_forbid_legacy_on_new_only: false
+        nom2_forbid_legacy_on_new_only: true
 
   - test:
       name: TC-PROM-NOM-3 nfsv4 to nfs_v4 migration
       module: test_nfs_prometheus_new_metrics.py
-      desc: nfsv4__/nfs_v4 op_count increases after NFSv4 R/W workload
+      desc: >
+        Exact nfs_v4_op_count present and increases after NFSv4 R/W
+        (legacy-only builds SKIP rename acceptance)
       polarion-id: CEPH-83633142
       abort-on-fail: false
       config:
@@ -563,7 +569,9 @@ tests:
   - test:
       name: TC-PROM-NOM-4 Dual-export consistency audit
       module: test_nfs_prometheus_new_metrics.py
-      desc: When dual mode, paired legacy/new values agree within tolerance
+      desc: >
+        When exact legacy+new name pairs are present, paired totals agree
+        within tolerance (SKIP if not true dual)
       polarion-id: CEPH-83633143
       abort-on-fail: false
       config:

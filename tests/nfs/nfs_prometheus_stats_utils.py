@@ -1410,6 +1410,11 @@ def _sum_counter_for_exact_name(metrics_text, metric_name):
     return total
 
 
+def metric_exact_available(names, metric_name):
+    """True iff the exact scraped metric name is present (no aliases/variants)."""
+    return metric_name in names
+
+
 def metric_available(names, metric_name):
     candidates = list(_metric_name_variants(metric_name))
     candidates.extend(MANIFEST_METRIC_ALIASES.get(metric_name, ()))
@@ -2053,30 +2058,32 @@ def _find_v4_op_count_series(metrics_text):
 
 
 def verify_nfsv4_op_count_after_workload(metrics_before, metrics_after):
-    """S-08: nfsv4__op_count present with op/status labels and increases after v4 IO."""
+    """S-08: v4 op_count (nfsv4__ / nfs_v4 / aliases) increases after v4 IO."""
     before = _find_v4_op_count_series(metrics_before)
     after = _find_v4_op_count_series(metrics_after)
     if not after:
         raise OperationFailedError(
-            "nfsv4__op_count not found with op/status labels after workload"
+            "v4 op_count not found with op/status labels after workload "
+            "(tried %s)" % (", ".join(V4_OP_COUNT_METRICS),)
         )
 
     increased = []
     for key, after_value in after.items():
         before_value = before.get(key, 0)
         if after_value > before_value:
-            _, op, status = key
+            name, op, status = key
             increased.append(
-                "%s/%s (%s -> %s)" % (op, status, before_value, after_value)
+                "%s %s/%s (%s -> %s)" % (name, op, status, before_value, after_value)
             )
 
     if not increased:
         raise OperationFailedError(
-            "nfsv4__op_count series present but none increased after workload"
+            "v4 op_count series present but none increased after workload "
+            "(names=%s)" % sorted({k[0] for k in after})
         )
 
     log.info(
-        "S-08: nfsv4__op_count increased for %s operations (total series after=%s)",
+        "S-08: v4 op_count increased for %s operations (total series after=%s)",
         len(increased),
         len(after),
     )
